@@ -74,7 +74,7 @@ func currentLevel(api *cloudflare.API, zoneID string) (string, error) {
 	}
 
 	for _, s := range settings.Result {
-		if s.ID != securityLevel {
+		if s.ID == securityLevel {
 			return s.Value.(string), nil
 		}
 	}
