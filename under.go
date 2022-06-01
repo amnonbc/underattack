@@ -13,6 +13,8 @@ import (
 	"github.com/cloudflare/cloudflare-go"
 )
 
+const securityLevel = "security_level"
+
 type Config struct {
 	Domain string
 	ApiKey string
@@ -49,20 +51,10 @@ func setSecurityLevel(value string) error {
 		return err
 	}
 
-	settings, err := api.ZoneSettings(context.TODO(), zoneID)
-	if err != nil {
-		return err
-	}
-	const securityLevel = "security_level"
-
-	for _, s := range settings.Result {
-		if s.ID != securityLevel {
-			continue
-		}
-		if s.Value.(string) == value {
-			log.Println(securityLevel, "already is", value)
-			return nil
-		}
+	currentLevel, err := currentLevel(api, zoneID)
+	if currentLevel == value {
+		log.Println(securityLevel, "already is", value)
+		return nil
 	}
 
 	log.Println("setting security level to", value)
@@ -73,6 +65,20 @@ func setSecurityLevel(value string) error {
 		},
 	})
 	return err
+}
+
+func currentLevel(api *cloudflare.API, zoneID string) (string, error) {
+	settings, err := api.ZoneSettings(context.TODO(), zoneID)
+	if err != nil {
+		return "", err
+	}
+
+	for _, s := range settings.Result {
+		if s.ID != securityLevel {
+			return s.Value.(string), nil
+		}
+	}
+	return "", nil
 }
 
 func main() {
