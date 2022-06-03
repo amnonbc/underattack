@@ -31,12 +31,23 @@ func loadConfig(fn string) error {
 	return json.NewDecoder(f).Decode(&config)
 }
 
-func loadAvg(text string) (float64, error) {
-	f := strings.Fields(text)
-	if len(f) == 0 {
-		return 0, errors.New("empty number")
+func loadAvg(text string) ([]float64, error) {
+	var res []float64
+	fields := strings.Fields(text)
+	if len(fields) < 4 {
+		return nil, errors.New("empty number")
 	}
-	return strconv.ParseFloat(f[0], 64)
+	for i, field := range fields {
+		f, err := strconv.ParseFloat(field, 64)
+		if err != nil {
+			return nil, err
+		}
+		res = append(res, f)
+		if i >= 2 {
+			break
+		}
+	}
+	return res, nil
 }
 
 // setSecurityLevel sets the security level. value must be one of
@@ -53,7 +64,6 @@ func setSecurityLevel(value string) error {
 
 	currentLevel, err := currentLevel(api, zoneID)
 	if currentLevel == value {
-		log.Println(securityLevel, "already is", value)
 		return nil
 	}
 
@@ -84,7 +94,7 @@ func currentLevel(api *cloudflare.API, zoneID string) (string, error) {
 func main() {
 	cf := flag.String("config", "/etc/underattack.conf", "config file")
 	maxLoad := flag.Float64("maxLoad", 6.0, "max load before going into lockdown")
-	minLoad := flag.Float64("minLoad", 2.0, "turn down to medium if we reach this level")
+	minLoad := flag.Float64("minLoad", 1.0, "turn down to medium if we reach this level")
 	defaultSecurityLevel := flag.String("default_level", "medium", "sercurity level to set when load is low")
 	loadFile := flag.String("loadFile", "/proc/loadavg", "location of loadavg proc file")
 	flag.Parse()
@@ -101,11 +111,11 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	log.Println("Load average is", la)
-	if la >= *maxLoad {
+	if la[0] >= *maxLoad {
+		log.Println("Load average is", la, "setting level to under_attack")
 		err = setSecurityLevel("under_attack")
 	}
-	if la <= *minLoad {
+	if la[0] < *minLoad && la[1] < *minLoad && la[2] < *minLoad {
 		err = setSecurityLevel(*defaultSecurityLevel)
 	}
 	if err != nil {

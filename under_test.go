@@ -10,7 +10,7 @@ import (
 func Test_loadAvg(t *testing.T) {
 	got, err := loadAvg("1.01 0.97 0.94 1/159 2795695")
 	require.NoError(t, err)
-	assert.Equal(t, 1.01, got)
+	assert.Equal(t, []float64{1.01, 0.97, 0.94}, got)
 }
 
 func Test_loadAvgNil(t *testing.T) {
