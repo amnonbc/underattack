@@ -5,19 +5,23 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"github.com/pbnjay/memory"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/cloudflare/cloudflare-go"
+	cloudflare "github.com/cloudflare/cloudflare-go"
 )
 
 const securityLevel = "security_level"
 
 type Config struct {
-	Domain string
-	ApiKey string
+	Domain     string
+	ApiKey     string
+	DbName     string
+	DbUser     string
+	DbPassword string
 }
 
 var config Config
@@ -111,6 +115,19 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
+	freeMem := memory.FreeMemory()
+	log.Println("freeMem", freeMem, "load", la)
+
+	err = checkDb(config)
+	if err != nil {
+		log.Println("checkDb returned", err)
+		err = setSecurityLevel("under_attack")
+		if err != nil {
+			log.Println(err)
+		}
+		return
+	}
+
 	if la[0] >= *maxLoad {
 		log.Println("Load average is", la, "setting level to under_attack")
 		err = setSecurityLevel("under_attack")
