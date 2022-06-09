@@ -78,6 +78,8 @@ func Test_app_setSecurityLevel(t *testing.T) {
 			  "errors": [],
 			  "messages": []
 			}`)
+		default:
+			t.Errorf("There should not have been a %s request", r.Method)
 		}
 	}))
 	defer s.Close()
@@ -100,7 +102,7 @@ func Test_app_setSecurityLevelAlreadyThere(t *testing.T) {
 		case "GET":
 			io.WriteString(w, settingsResponse)
 		default:
-			t.Error("There should not have been a patch request")
+			t.Errorf("There should not have been a %s request", r.Method)
 		}
 	}))
 	defer s.Close()
