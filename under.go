@@ -24,15 +24,19 @@ type Config struct {
 	DbPassword string
 }
 
-var config Config
+type app struct {
+	conf   Config
+	api    *cloudflare.API
+	zoneId string
+}
 
-func loadConfig(fn string) error {
+func (a *app) loadConfig(fn string) error {
 	f, err := os.Open(fn)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return json.NewDecoder(f).Decode(&config)
+	return json.NewDecoder(f).Decode(&a.conf)
 }
 
 func loadAvg(text string) ([]float64, error) {
@@ -54,25 +58,27 @@ func loadAvg(text string) ([]float64, error) {
 	return res, nil
 }
 
+func (a *app) init() error {
+	var err error
+	a.api, err = cloudflare.NewWithAPIToken(a.conf.ApiKey)
+	if err != nil {
+		return err
+	}
+	a.zoneId, err = a.api.ZoneIDByName(a.conf.Domain)
+	return err
+}
+
 // setSecurityLevel sets the security level. value must be one of
 // off, essentially_off, low, medium, high, under_attack.
-func setSecurityLevel(value string) error {
-	api, err := cloudflare.NewWithAPIToken(config.ApiKey)
-	if err != nil {
-		return err
-	}
-	zoneID, err := api.ZoneIDByName(config.Domain)
-	if err != nil {
-		return err
-	}
-
-	currentLevel, err := currentLevel(api, zoneID)
+// If the cf security is already at the reauested level, then do nothing.
+func (a *app) setSecurityLevel(value string) error {
+	currentLevel, err := a.currentLevel()
 	if currentLevel == value {
 		return nil
 	}
 
 	log.Println("setting security level to", value)
-	_, err = api.UpdateZoneSettings(context.TODO(), zoneID, []cloudflare.ZoneSetting{
+	_, err = a.api.UpdateZoneSettings(context.TODO(), a.zoneId, []cloudflare.ZoneSetting{
 		{
 			ID:    securityLevel,
 			Value: value,
@@ -81,15 +87,15 @@ func setSecurityLevel(value string) error {
 	return err
 }
 
-func mustSetSecurityLevel(value string) {
-	err := setSecurityLevel(value)
+func (a *app) mustSetSecurityLevel(value string) {
+	err := a.setSecurityLevel(value)
 	if err != nil {
 		log.Fatalln(err)
 	}
 }
 
-func currentLevel(api *cloudflare.API, zoneID string) (string, error) {
-	settings, err := api.ZoneSettings(context.TODO(), zoneID)
+func (a *app) currentLevel() (string, error) {
+	settings, err := a.api.ZoneSettings(context.TODO(), a.zoneId)
 	if err != nil {
 		return "", err
 	}
@@ -114,7 +120,13 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	err = loadConfig(*cf)
+	var a app
+	err = a.loadConfig(*cf)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	err = a.init()
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -131,23 +143,23 @@ func main() {
 	log.Println("freeMem", humanize.Bytes(freeMem), "load", la)
 	if freeMem < mb {
 		log.Println("free memory is below", *minBytesStr)
-		mustSetSecurityLevel("under_attack")
+		a.mustSetSecurityLevel("under_attack")
 		return
 	}
-	err = checkDb(config)
+	err = a.checkDb()
 	if err != nil {
 		log.Println("checkDb returned", err)
-		mustSetSecurityLevel("under_attack")
+		a.mustSetSecurityLevel("under_attack")
 		return
 	}
 
 	if la[0] >= *maxLoad {
 		log.Println("Load average is", la, "setting level to under_attack")
-		mustSetSecurityLevel("under_attack")
+		a.mustSetSecurityLevel("under_attack")
 		return
 	}
 	if la[0] < *minLoad && la[1] < *minLoad && la[2] < *minLoad {
-		mustSetSecurityLevel(*defaultSecurityLevel)
+		a.mustSetSecurityLevel(*defaultSecurityLevel)
 		return
 	}
 }
