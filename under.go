@@ -70,10 +70,10 @@ func (a *app) init() error {
 
 // setSecurityLevel sets the security level. value must be one of
 // off, essentially_off, low, medium, high, under_attack.
-// If the cf security is already at the reauested level, then do nothing.
 func (a *app) setSecurityLevel(value string) error {
 	currentLevel, err := a.currentLevel()
-	if currentLevel == value {
+	if err == nil && currentLevel == value {
+		// Nothing to do.
 		return nil
 	}
 
