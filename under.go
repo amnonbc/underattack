@@ -25,7 +25,14 @@ type Config struct {
 }
 
 type app struct {
-	conf   Config
+	conf Config
+
+	maxLoad              float64
+	minLoad              float64
+	minFreeBytes         uint64
+	defaultSecurityLevel string
+	loadFile             string
+
 	api    *cloudflare.API
 	zoneId string
 }
@@ -109,18 +116,19 @@ func (a *app) currentLevel() (string, error) {
 }
 
 func main() {
+	var a app
 	cf := flag.String("config", "/etc/underattack.conf", "config file")
-	maxLoad := flag.Float64("maxLoad", 6.0, "max load before going into lockdown")
-	minLoad := flag.Float64("minLoad", 1.0, "turn down to medium if we reach this level")
+	flag.Float64Var(&a.maxLoad, "maxLoad", 6.0, "max load before going into lockdown")
+	flag.Float64Var(&a.minLoad, "minLoad", 1.0, "turn down to medium if we reach this level")
 	minBytesStr := flag.String("minBytes", "1 GB", "go into lockdown if free memory falls below minBytes")
-	defaultSecurityLevel := flag.String("default_level", "medium", "sercurity level to set when load is low")
-	loadFile := flag.String("loadFile", "/proc/loadavg", "location of loadavg proc file")
+	flag.StringVar(&a.defaultSecurityLevel, "default_level", "medium", "sercurity level to set when load is low")
+	flag.StringVar(&a.loadFile, "loadFile", "/proc/loadavg", "location of loadavg proc file")
 	flag.Parse()
-	mb, err := humanize.ParseBytes(*minBytesStr)
+	var err error
+	a.minFreeBytes, err = humanize.ParseBytes(*minBytesStr)
 	if err != nil {
 		log.Fatalln(err)
 	}
-	var a app
 	err = a.loadConfig(*cf)
 	if err != nil {
 		log.Fatalln(err)
@@ -130,8 +138,11 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
+	a.doIt()
+}
 
-	text, err := os.ReadFile(*loadFile)
+func (a *app) doIt() {
+	text, err := os.ReadFile(a.loadFile)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -141,25 +152,34 @@ func main() {
 	}
 	freeMem := memory.FreeMemory()
 	log.Println("freeMem", humanize.Bytes(freeMem), "load", la)
-	if freeMem < mb {
-		log.Println("free memory is below", *minBytesStr)
+	if freeMem < a.minFreeBytes {
+		log.Println("free memory is below", humanize.Bytes(a.minFreeBytes))
 		a.mustSetSecurityLevel("under_attack")
 		return
 	}
 	err = a.checkDb()
 	if err != nil {
-		log.Println("checkDb returned", err)
+		log.Println("can not connect to db", err)
 		a.mustSetSecurityLevel("under_attack")
 		return
 	}
 
-	if la[0] >= *maxLoad {
+	if la[0] >= a.maxLoad {
 		log.Println("Load average is", la, "setting level to under_attack")
 		a.mustSetSecurityLevel("under_attack")
 		return
 	}
-	if la[0] < *minLoad && la[1] < *minLoad && la[2] < *minLoad {
-		a.mustSetSecurityLevel(*defaultSecurityLevel)
+	if allBelow(la, a.minLoad) {
+		a.mustSetSecurityLevel(a.defaultSecurityLevel)
 		return
 	}
+}
+
+func allBelow(a []float64, x float64) bool {
+	for _, v := range a {
+		if v >= x {
+			return false
+		}
+	}
+	return true
 }
