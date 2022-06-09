@@ -40,10 +40,11 @@ const settingsResponse = `
 
 func Test_app_currentLevel(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/zones/myzone/settings", r.RequestURI)
 		io.WriteString(w, settingsResponse)
 	}))
 	defer s.Close()
-	a := app{}
+	a := app{zoneId: "myzone"}
 	var err error
 	a.api, err = cloudflare.New("key", "email")
 	require.NoError(t, err)
