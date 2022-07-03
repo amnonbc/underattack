@@ -151,8 +151,8 @@ func (a *app) doIt() {
 		log.Fatalln(err)
 	}
 	freeMem := memory.FreeMemory()
-	log.Println("freeMem", humanize.Bytes(freeMem), "load", la)
 	if freeMem < a.minFreeBytes {
+		log.Println("freeMem", humanize.Bytes(freeMem), "load", la)
 		log.Println("free memory is below", humanize.Bytes(a.minFreeBytes))
 		a.mustSetSecurityLevel("under_attack")
 		return
@@ -165,6 +165,7 @@ func (a *app) doIt() {
 	}
 
 	if la[0] >= a.maxLoad {
+		log.Println("freeMem", humanize.Bytes(freeMem), "load", la)
 		log.Println("Load average is", la, "setting level to under_attack")
 		a.mustSetSecurityLevel("under_attack")
 		return
