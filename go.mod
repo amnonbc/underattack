@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/cloudflare/cloudflare-go v0.45.0
-	github.com/dustin/go-humanize v1.0.0
+	github.com/dustin/go-humanize v1.0.1
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58
 	github.com/stretchr/testify v1.8.0
