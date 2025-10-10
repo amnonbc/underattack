@@ -1,20 +1,21 @@
 package main
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
-	"github.com/cloudflare/cloudflare-go"
-	"github.com/dustin/go-humanize"
-	"github.com/pbnjay/memory"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
-)
 
-const securityLevel = "security_level"
+	_ "github.com/go-sql-driver/mysql"
+)
 
 type Config struct {
 	Domain     string
@@ -22,19 +23,16 @@ type Config struct {
 	DbName     string
 	DbUser     string
 	DbPassword string
+	RuleID     string
+	RulesetID  string
 }
 
 type app struct {
-	conf Config
-
-	maxLoad              float64
-	minLoad              float64
-	minFreeBytes         uint64
-	defaultSecurityLevel string
-	loadFile             string
-
-	api    *cloudflare.API
-	zoneId string
+	conf     Config
+	maxLoad  float64
+	minLoad  float64
+	loadFile string
+	zoneId   string
 }
 
 func (a *app) loadConfig(fn string) error {
@@ -66,78 +64,173 @@ func loadAvg(text string) ([]float64, error) {
 }
 
 func (a *app) init() error {
-	var err error
-	a.api, err = cloudflare.NewWithAPIToken(a.conf.ApiKey)
+	zoneResp, err := http.NewRequest("GET", "https://api.cloudflare.com/client/v4/zones", nil)
 	if err != nil {
 		return err
 	}
-	a.zoneId, err = a.api.ZoneIDByName(a.conf.Domain)
-	return err
+	zoneResp.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
+	zoneResp.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(zoneResp)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var data struct {
+		Result []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"result"`
+	}
+
+	err = json.Unmarshal(body, &data)
+	if err != nil {
+		return err
+	}
+
+	for _, z := range data.Result {
+		if z.Name == a.conf.Domain {
+			a.zoneId = z.ID
+			return nil
+		}
+	}
+
+	return errors.New("zone ID not found for domain " + a.conf.Domain)
 }
 
-// setSecurityLevel sets the security level. value must be one of
-// off, essentially_off, low, medium, high, under_attack.
-func (a *app) setSecurityLevel(value string) error {
-	currentLevel, err := a.currentLevel()
-	if err == nil && currentLevel == value {
-		// Nothing to do.
+func countLsphpProcesses() (int, error) {
+	out, err := exec.Command("pgrep", "-fc", "lsphp").Output()
+	if err != nil {
+		return 0, err
+	}
+	countStr := strings.TrimSpace(string(out))
+	return strconv.Atoi(countStr)
+}
+
+// getRuleState fetches the current enabled state of the rule
+func (a *app) getRuleState() (bool, error) {
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/rulesets/%s",
+		a.zoneId, a.conf.RulesetID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("Cloudflare API returned HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var data struct {
+		Result struct {
+			Rules []struct {
+				ID      string `json:"id"`
+				Enabled bool   `json:"enabled"`
+			} `json:"rules"`
+		} `json:"result"`
+	}
+
+	err = json.Unmarshal(body, &data)
+	if err != nil {
+		return false, err
+	}
+
+	for _, rule := range data.Result.Rules {
+		if rule.ID == a.conf.RuleID {
+			return rule.Enabled, nil
+		}
+	}
+
+	return false, errors.New("rule not found in ruleset")
+}
+
+func (a *app) setRuleEnabled(enable bool) error {
+	// Check current state only when we need to make a change
+	currentState, err := a.getRuleState()
+	if err != nil {
+		log.Printf("Warning: could not fetch current rule state: %v", err)
+		log.Println("Proceeding with rule update anyway...")
+	} else if currentState == enable {
+		// log.Printf("Rule is already %s, skipping API call", map[bool]string{true: "enabled", false: "disabled"}[enable])
 		return nil
 	}
 
-	log.Println("setting security level to", value)
-	_, err = a.api.UpdateZoneSettings(context.TODO(), a.zoneId, []cloudflare.ZoneSetting{
-		{
-			ID:    securityLevel,
-			Value: value,
-		},
-	})
-	return err
-}
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/rulesets/%s/rules/%s",
+		a.zoneId, a.conf.RulesetID, a.conf.RuleID)
 
-func (a *app) mustSetSecurityLevel(value string) {
-	err := a.setSecurityLevel(value)
+	payload := map[string]interface{}{
+		"action":      "managed_challenge",
+		"description": "Bot check",
+		"enabled":     enable,
+		"expression":  "http.request.uri.path contains \"/articles/\" and http.request.method eq \"GET\" and not cf.client.bot and not http.cookie contains \"wordpress_logged_in\"",
+	}
+
+	body, err := json.Marshal(payload)
 	if err != nil {
-		log.Fatalln(err)
+		return err
 	}
-}
 
-func (a *app) currentLevel() (string, error) {
-	settings, err := a.api.ZoneSettings(context.TODO(), a.zoneId)
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	for _, s := range settings.Result {
-		if s.ID == securityLevel {
-			return s.Value.(string), nil
-		}
+	req.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
 	}
-	return "", nil
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Cloudflare API returned HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	log.Printf("Successfully %s bot check rule", map[bool]string{true: "enabled", false: "disabled"}[enable])
+
+	return nil
 }
 
 func main() {
 	var a app
-	cf := flag.String("config", "/etc/underattack.conf", "config file")
-	flag.Float64Var(&a.maxLoad, "maxLoad", 6.0, "max load before going into lockdown")
-	flag.Float64Var(&a.minLoad, "minLoad", 1.0, "turn down to medium if we reach this level")
-	minBytesStr := flag.String("minBytes", "1 GB", "go into lockdown if free memory falls below minBytes")
-	flag.StringVar(&a.defaultSecurityLevel, "default_level", "medium", "sercurity level to set when load is low")
+
+	log.SetFlags(log.LstdFlags)
+
+	cf := flag.String("config", "/etc/botCheck.conf", "config file")
+	flag.Float64Var(&a.maxLoad, "maxLoad", 4.5, "max load before enabling bot check rule")
+	flag.Float64Var(&a.minLoad, "minLoad", 1.0, "disable bot check rule if load is this low")
 	flag.StringVar(&a.loadFile, "loadFile", "/proc/loadavg", "location of loadavg proc file")
 	flag.Parse()
-	var err error
-	a.minFreeBytes, err = humanize.ParseBytes(*minBytesStr)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	err = a.loadConfig(*cf)
-	if err != nil {
+
+	if err := a.loadConfig(*cf); err != nil {
 		log.Fatalln(err)
 	}
 
-	err = a.init()
-	if err != nil {
+	if err := a.init(); err != nil {
 		log.Fatalln(err)
 	}
+
 	a.doIt()
 }
 
@@ -146,32 +239,53 @@ func (a *app) doIt() {
 	if err != nil {
 		log.Fatalln(err)
 	}
+
 	la, err := loadAvg(string(text))
 	if err != nil {
 		log.Fatalln(err)
 	}
-	freeMem := memory.FreeMemory()
-	if freeMem < a.minFreeBytes {
-		log.Println("freeMem", humanize.Bytes(freeMem), "load", la)
-		log.Println("free memory is below", humanize.Bytes(a.minFreeBytes))
-		a.mustSetSecurityLevel("under_attack")
-		return
-	}
+
 	err = a.checkDb()
 	if err != nil {
-		log.Println("can not connect to db", err)
-		a.mustSetSecurityLevel("under_attack")
+		log.Println("cannot connect to db:", err)
+		log.Println("enabling Cloudflare bot check rule due to DB failure")
+		err := a.setRuleEnabled(true)
+		if err != nil {
+			log.Fatalln("Failed to enable bot check rule:", err)
+		}
 		return
 	}
 
+	lsphpCount, err := countLsphpProcesses()
+	if err != nil {
+		log.Println("Warning: could not count lsphp processes:", err)
+	} else {
+		// log.Println("lsphp process count:", lsphpCount)
+		if lsphpCount > 20 {
+			log.Println("lsphp count:", lsphpCount, "- enabling bot check rule")
+			err := a.setRuleEnabled(true)
+			if err != nil {
+				log.Fatalln("Failed to enable bot check rule:", err)
+			}
+			return
+		}
+	}
+
 	if la[0] >= a.maxLoad {
-		log.Println("freeMem", humanize.Bytes(freeMem), "load", la)
-		log.Println("Load average is", la, "setting level to under_attack")
-		a.mustSetSecurityLevel("under_attack")
+		log.Println("Load average is", la, "enabling bot check rule")
+		err := a.setRuleEnabled(true)
+		if err != nil {
+			log.Fatalln("Failed to enable bot check rule:", err)
+		}
 		return
 	}
+
 	if allBelow(la, a.minLoad) {
-		a.mustSetSecurityLevel(a.defaultSecurityLevel)
+		// log.Println("Load average is below threshold, disabling bot check rule")
+		err := a.setRuleEnabled(false)
+		if err != nil {
+			log.Fatalln("Below threshold but failed to disable bot check rule:", err)
+		}
 		return
 	}
 }
