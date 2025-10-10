@@ -71,14 +71,11 @@ func (a *app) init() error {
 	zoneResp.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
 	zoneResp.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(zoneResp)
+	resp, err := http.DefaultClient.Do(zoneResp)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
 
 	var data struct {
 		Result []struct {
@@ -87,7 +84,7 @@ func (a *app) init() error {
 		} `json:"result"`
 	}
 
-	err = json.Unmarshal(body, &data)
+	err = json.NewDecoder(resp.Body).Decode(&data)
 	if err != nil {
 		return err
 	}
@@ -124,8 +121,7 @@ func (a *app) getRuleState() (bool, error) {
 	req.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -136,8 +132,6 @@ func (a *app) getRuleState() (bool, error) {
 		return false, fmt.Errorf("Cloudflare API returned HTTP %d: %s", resp.StatusCode, respBody)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-
 	var data struct {
 		Result struct {
 			Rules []struct {
@@ -147,7 +141,7 @@ func (a *app) getRuleState() (bool, error) {
 		} `json:"result"`
 	}
 
-	err = json.Unmarshal(body, &data)
+	err = json.NewDecoder(resp.Body).Decode(&data)
 	if err != nil {
 		return false, err
 	}
@@ -195,8 +189,7 @@ func (a *app) setRuleEnabled(enable bool) error {
 	req.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
