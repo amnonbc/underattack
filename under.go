@@ -10,9 +10,10 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/mitchellh/go-ps"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -98,14 +99,18 @@ func (a *app) init() error {
 
 	return errors.New("zone ID not found for domain " + a.conf.Domain)
 }
-
-func countLsphpProcesses() (int, error) {
-	out, err := exec.Command("pgrep", "-fc", "lsphp").Output()
+func countProcesses(pattern string) (int, error) {
+	procs, err := ps.Processes()
 	if err != nil {
 		return 0, err
 	}
-	countStr := strings.TrimSpace(string(out))
-	return strconv.Atoi(countStr)
+	n := 0
+	for _, proc := range procs {
+		if strings.Contains(proc.Executable(), pattern) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // getRuleState fetches the current enabled state of the rule
@@ -249,7 +254,7 @@ func (a *app) doIt() {
 		return
 	}
 
-	lsphpCount, err := countLsphpProcesses()
+	lsphpCount, err := countProcesses("lsphp")
 	if err != nil {
 		log.Println("Warning: could not count lsphp processes:", err)
 	} else {
