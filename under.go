@@ -18,6 +18,12 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+const (
+	zoneUrl    = "https://api.cloudflare.com/client/v4/zones"
+	rulesetUrl = zoneUrl + "/%s/rulesets/%s"
+	ruleUrl    = rulesetUrl + "/rules/%s"
+)
+
 type Config struct {
 	Domain     string
 	ApiKey     string
@@ -32,6 +38,7 @@ type app struct {
 	conf     Config
 	maxLoad  float64
 	minLoad  float64
+	maxProcs int
 	loadFile string
 	zoneId   string
 }
@@ -65,12 +72,10 @@ func loadAvg(text string) ([]float64, error) {
 }
 
 func (a *app) init() error {
-	zoneResp, err := http.NewRequest("GET", "https://api.cloudflare.com/client/v4/zones", nil)
+	zoneResp, err := a.NewRequest("GET", zoneUrl, nil)
 	if err != nil {
 		return err
 	}
-	zoneResp.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
-	zoneResp.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(zoneResp)
 	if err != nil {
@@ -99,6 +104,7 @@ func (a *app) init() error {
 
 	return errors.New("zone ID not found for domain " + a.conf.Domain)
 }
+
 func countProcesses(pattern string) (int, error) {
 	procs, err := ps.Processes()
 	if err != nil {
@@ -106,25 +112,32 @@ func countProcesses(pattern string) (int, error) {
 	}
 	n := 0
 	for _, proc := range procs {
-		if strings.Contains(proc.Executable(), pattern) {
+		if proc.Executable() == pattern {
 			n++
 		}
 	}
 	return n, nil
 }
 
+func (a *app) NewRequest(method, url string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
 // getRuleState fetches the current enabled state of the rule
 func (a *app) getRuleState() (bool, error) {
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/rulesets/%s",
+	url := fmt.Sprintf(rulesetUrl,
 		a.zoneId, a.conf.RulesetID)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := a.NewRequest("GET", url, nil)
 	if err != nil {
 		return false, err
 	}
-
-	req.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -167,12 +180,10 @@ func (a *app) setRuleEnabled(enable bool) error {
 		log.Printf("Warning: could not fetch current rule state: %v", err)
 		log.Println("Proceeding with rule update anyway...")
 	} else if currentState == enable {
-		// log.Printf("Rule is already %s, skipping API call", map[bool]string{true: "enabled", false: "disabled"}[enable])
 		return nil
 	}
 
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/rulesets/%s/rules/%s",
-		a.zoneId, a.conf.RulesetID, a.conf.RuleID)
+	url := fmt.Sprintf(ruleUrl, a.zoneId, a.conf.RulesetID, a.conf.RuleID)
 
 	payload := map[string]interface{}{
 		"action":      "managed_challenge",
@@ -186,13 +197,10 @@ func (a *app) setRuleEnabled(enable bool) error {
 		return err
 	}
 
-	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
+	req, err := a.NewRequest("PATCH", url, bytes.NewBuffer(body))
 	if err != nil {
 		return err
 	}
-
-	req.Header.Set("Authorization", "Bearer "+a.conf.ApiKey)
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -218,6 +226,7 @@ func main() {
 	cf := flag.String("config", "/etc/botCheck.conf", "config file")
 	flag.Float64Var(&a.maxLoad, "maxLoad", 4.5, "max load before enabling bot check rule")
 	flag.Float64Var(&a.minLoad, "minLoad", 1.0, "disable bot check rule if load is this low")
+	flag.IntVar(&a.maxProcs, "maxProc", 20, "max number of lsphp processes we allow to run")
 	flag.StringVar(&a.loadFile, "loadFile", "/proc/loadavg", "location of loadavg proc file")
 	flag.Parse()
 
@@ -258,8 +267,7 @@ func (a *app) doIt() {
 	if err != nil {
 		log.Println("Warning: could not count lsphp processes:", err)
 	} else {
-		// log.Println("lsphp process count:", lsphpCount)
-		if lsphpCount > 20 {
+		if lsphpCount > a.maxProcs {
 			log.Println("lsphp count:", lsphpCount, "- enabling bot check rule")
 			err := a.setRuleEnabled(true)
 			if err != nil {
