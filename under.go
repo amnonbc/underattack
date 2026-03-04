@@ -18,12 +18,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-const (
-	zoneUrl    = "https://api.cloudflare.com/client/v4/zones"
-	rulesetUrl = zoneUrl + "/%s/rulesets/%s"
-	ruleUrl    = rulesetUrl + "/rules/%s"
-)
-
 type Config struct {
 	Domain     string
 	ApiKey     string
@@ -41,6 +35,8 @@ type app struct {
 	maxProcs int
 	loadFile string
 	zoneId   string
+	client   *http.Client
+	baseURL  string // override for testing; defaults to cloudflare base
 }
 
 func (a *app) loadConfig(fn string) error {
@@ -72,12 +68,12 @@ func loadAvg(text string) ([]float64, error) {
 }
 
 func (a *app) init() error {
-	zoneResp, err := a.NewRequest("GET", zoneUrl, nil)
+	zoneResp, err := a.NewRequest("GET", a.baseURL+"/zones", nil)
 	if err != nil {
 		return err
 	}
 
-	resp, err := http.DefaultClient.Do(zoneResp)
+	resp, err := a.client.Do(zoneResp)
 	if err != nil {
 		return err
 	}
@@ -131,7 +127,7 @@ func (a *app) NewRequest(method, url string, body io.Reader) (*http.Request, err
 
 // getRuleState fetches the current enabled state of the rule
 func (a *app) getRuleState() (bool, error) {
-	url := fmt.Sprintf(rulesetUrl,
+	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s",
 		a.zoneId, a.conf.RulesetID)
 
 	req, err := a.NewRequest("GET", url, nil)
@@ -139,7 +135,7 @@ func (a *app) getRuleState() (bool, error) {
 		return false, err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := a.client.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -183,9 +179,9 @@ func (a *app) setRuleEnabled(enable bool) error {
 		return nil
 	}
 
-	url := fmt.Sprintf(ruleUrl, a.zoneId, a.conf.RulesetID, a.conf.RuleID)
+	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules/%s", a.zoneId, a.conf.RulesetID, a.conf.RuleID)
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"action":      "managed_challenge",
 		"description": "Bot check",
 		"enabled":     enable,
@@ -202,7 +198,7 @@ func (a *app) setRuleEnabled(enable bool) error {
 		return err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := a.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -218,8 +214,15 @@ func (a *app) setRuleEnabled(enable bool) error {
 	return nil
 }
 
+func newApp() *app {
+	return &app{
+		client:  http.DefaultClient,
+		baseURL: "https://api.cloudflare.com/client/v4",
+	}
+}
+
 func main() {
-	var a app
+	a := newApp()
 
 	log.SetFlags(log.LstdFlags)
 
