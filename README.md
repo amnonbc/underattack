@@ -1,29 +1,65 @@
 # underattack
-switch cloudflare FW to under_attack mode when server load is high
+Switch a Cloudflare WAF rule to challenge bots when server load is high.
 
 [![Go](https://github.com/amnonbc/underattack/actions/workflows/go2.yml/badge.svg)](https://github.com/amnonbc/underattack/actions/workflows/go2.yml)
 
-This runs on a web host which sits behind cloudflare.
+## Overview
 
-It is run using a cron like
+This runs on a web host sitting behind Cloudflare. It is invoked by cron every
+few minutes and checks the server's load average, free memory, and database
+connectivity. If the server is under stress it creates a Cloudflare WAF rule
+that issues a managed challenge to bot traffic, which typically allows server
+resources to recover. Once the server recovers the rule is deleted.
+
+The rule is a managed challenge targeting GET requests to `/articles/` paths,
+exempting:
+- Requests Cloudflare already identifies as known bots (`cf.client.bot`)
+- Logged-in WordPress users (those with a `wordpress_logged_in` cookie)
+- Articles published in the last 7 days (plus tomorrow, to cover timezone
+  differences between the server and the publication timezone)
+
+The rule is created fresh on each activation so the exempted date window stays
+current. If the rule already covers today's date it is left unchanged to avoid
+unnecessary API churn.
+
+## Usage
 
 ```
-*/5 * * * * ${HOME}/bin/underattack -config ${HOME}/etc/underatttack.conf -default_level high >> ${HOME}/logs/underattack.log 2>&1
+*/5 * * * * ${HOME}/bin/underattack -config ${HOME}/etc/underattack.conf >> ${HOME}/logs/underattack.log 2>&1
 ```
 
-It checks the server's load, free memory and tries to connect to the db.
-If the load is too high, the free memory is too low, or if it can't connect to the db,
-then it sets CF into under-attack mode, which massively reduces bot traffic which usually allows server resources to recover.
-Once the server has recovered, then it turns off under-attack mode.
+## Flags
 
-The config file looks like this:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-config` | `/etc/botCheck.conf` | Path to config file |
+| `-maxLoad` | `4.5` | Enable bot check rule if 1-minute load average exceeds this |
+| `-minLoad` | `1.0` | Remove bot check rule when all load averages drop below this |
+| `-maxProc` | `20` | Enable bot check rule if lsphp process count exceeds this |
+| `-loadFile` | `/proc/loadavg` | Path to load average file |
+| `-exemptDays` | `9` | Number of days to exempt from the bot check (includes tomorrow) |
+| `-dateFormat` | `02-01-2006` | Go time format used for dates in article URLs |
+| `-debug` | off | Enable debug logging |
+
+## Config file
 
 ```json
 {
-	"domain": "mydomain.com",
-	"apiKey": "cfApiKeyWithZoneZoneReadAmdZoneSecuritySet",
-	"DbName": "nameOfDb",
-	"DbUser": "NameOfDbUser",
-	"DbPassword": "dbUserPassword"
+    "domain": "mydomain.com",
+    "apiKey": "cfApiKeyWithZoneReadAndZoneSecurityEditPermissions",
+    "RulesetID": "yourCloudflareRulesetID",
+    "DbName": "nameOfDb",
+    "DbUser": "nameOfDbUser",
+    "DbPassword": "dbUserPassword"
 }
+```
+
+The Cloudflare API key requires **Zone:Read** and **Zone WAF:Edit** permissions.
+The ruleset ID can be found via `GET /zones/{zone_id}/rulesets` or in the
+Cloudflare dashboard under Security → WAF → Custom Rules.
+
+## Cross-compiling for Linux
+
+```
+GOOS=linux GOARCH=amd64 go build -o underattack .
 ```

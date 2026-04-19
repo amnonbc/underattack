@@ -111,18 +111,15 @@ func rulesetServer(t *testing.T, zoneID, rulesetID string, initial []testRule) (
 }
 
 func appForServer(ts *httptest.Server, zoneID, rulesetID string) *app {
-	return &app{
-		maxLoad:  4.5,
-		minLoad:  1.0,
-		maxProcs: 9999,
-		client:   ts.Client(),
-		baseURL:  ts.URL,
-		zoneId:   zoneID,
-		conf: Config{
-			ApiKey:    "test-key",
-			RulesetID: rulesetID,
-		},
-	}
+	a := newApp()
+	a.maxLoad = 4.5
+	a.minLoad = 1.0
+	a.maxProcs = 9999
+	a.client = ts.Client()
+	a.baseURL = ts.URL
+	a.zoneId = zoneID
+	a.conf = Config{ApiKey: "test-key", RulesetID: rulesetID}
+	return a
 }
 
 func writeTempLoadFile(t *testing.T, content string) string {
@@ -420,7 +417,7 @@ func TestEnsureBotCheck_NoopWhenInactiveAndNoRule(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildExpression_ContainsBaseConditions(t *testing.T) {
-	expr := buildExpression()
+	expr := newApp().buildExpression()
 	for _, want := range []string{
 		`http.request.uri.path contains "/articles/"`,
 		`http.request.method eq "GET"`,
@@ -434,7 +431,7 @@ func TestBuildExpression_ContainsBaseConditions(t *testing.T) {
 }
 
 func TestBuildExpression_ExemptsRecentDates(t *testing.T) {
-	expr := buildExpression()
+	expr := newApp().buildExpression()
 	// tomorrow through 7 days ago (9 dates total)
 	for i := range 9 {
 		d := time.Now().AddDate(0, 0, 1-i).Format("02-01-2006")
@@ -446,7 +443,7 @@ func TestBuildExpression_ExemptsRecentDates(t *testing.T) {
 }
 
 func TestBuildExpression_ExemptsTomorrow(t *testing.T) {
-	expr := buildExpression()
+	expr := newApp().buildExpression()
 	tomorrow := time.Now().AddDate(0, 0, 1).Format("02-01-2006")
 	if !strings.Contains(expr, tomorrow) {
 		t.Errorf("expression should exempt tomorrow (%s) for timezone offset", tomorrow)
@@ -454,7 +451,7 @@ func TestBuildExpression_ExemptsTomorrow(t *testing.T) {
 }
 
 func TestBuildExpression_DoesNotExemptOldDate(t *testing.T) {
-	expr := buildExpression()
+	expr := newApp().buildExpression()
 	old := time.Now().AddDate(0, 0, -8).Format("02-01-2006")
 	if strings.Contains(expr, old) {
 		t.Errorf("expression should not exempt date 8 days ago (%s)", old)
@@ -462,7 +459,7 @@ func TestBuildExpression_DoesNotExemptOldDate(t *testing.T) {
 }
 
 func TestBuildExpression_HasNineDateExemptions(t *testing.T) {
-	expr := buildExpression()
+	expr := newApp().buildExpression()
 	if !strings.Contains(expr, "not (") {
 		t.Error("expression missing 'not (' for date exemptions")
 	}

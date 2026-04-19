@@ -30,14 +30,16 @@ type Config struct {
 }
 
 type app struct {
-	conf     Config
-	maxLoad  float64
-	minLoad  float64
-	maxProcs int
-	loadFile string
-	zoneId   string
-	client   *http.Client
-	baseURL  string // override for testing; defaults to cloudflare base
+	conf       Config
+	maxLoad    float64
+	minLoad    float64
+	maxProcs   int
+	loadFile   string
+	zoneId     string
+	client     *http.Client
+	baseURL    string // override for testing; defaults to cloudflare base
+	exemptDays int
+	dateFormat string
 }
 
 func (a *app) loadConfig(fn string) error {
@@ -137,15 +139,18 @@ func (a *app) NewRequest(method, url string, body io.Reader) (*http.Request, err
 	return req, nil
 }
 
-func buildExpression() string {
+func (a *app) buildExpression() string {
+	base := `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
+	if a.exemptDays == 0 {
+		return base
+	}
 	now := time.Now()
-	clauses := make([]string, 9)
-	for i := range 9 {
-		d := now.AddDate(0, 0, 1-i).Format("02-01-2006") // tomorrow through 7 days ago
+	clauses := make([]string, a.exemptDays)
+	for i := range a.exemptDays {
+		d := now.AddDate(0, 0, 1-i).Format(a.dateFormat) // tomorrow through (exemptDays-2) days ago
 		clauses[i] = fmt.Sprintf(`http.request.uri.path contains "/%s/"`, d)
 	}
-	return `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"` +
-		" and not (" + strings.Join(clauses, " or ") + ")"
+	return base + " and not (" + strings.Join(clauses, " or ") + ")"
 }
 
 const botCheckDescription = "Bot check"
@@ -231,7 +236,7 @@ func (a *app) createRule(reason string) error {
 		"action":      "managed_challenge",
 		"description": botCheckDescription,
 		"enabled":     true,
-		"expression":  buildExpression(),
+		"expression":  a.buildExpression(),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -295,7 +300,7 @@ func (a *app) ensureBotCheck(active bool, reason string) error {
 		return fmt.Errorf("finding bot check rule: %w", err)
 	}
 	if active {
-		today := time.Now().Format("02-01-2006")
+		today := time.Now().Format(a.dateFormat)
 		if info != nil && strings.Contains(info.Expression, today) {
 			slog.Info("bot check rule already current, skipping", "id", info.ID, "reason", reason)
 			return nil
@@ -318,8 +323,10 @@ func (a *app) ensureBotCheck(active bool, reason string) error {
 
 func newApp() *app {
 	return &app{
-		client:  http.DefaultClient,
-		baseURL: "https://api.cloudflare.com/client/v4",
+		client:     http.DefaultClient,
+		baseURL:    "https://api.cloudflare.com/client/v4",
+		exemptDays: 9,
+		dateFormat: "02-01-2006",
 	}
 }
 
@@ -331,6 +338,8 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		return nil
 	})
+	flag.IntVar(&a.exemptDays, "exemptDays", 9, "number of days (including tomorrow) to exempt from bot check")
+	flag.StringVar(&a.dateFormat, "dateFormat", "02-01-2006", "Go time format for dates in article URLs")
 	flag.Float64Var(&a.maxLoad, "maxLoad", 4.5, "max load before enabling bot check rule")
 	flag.Float64Var(&a.minLoad, "minLoad", 1.0, "disable bot check rule if load is this low")
 	flag.IntVar(&a.maxProcs, "maxProc", 20, "max number of lsphp processes we allow to run")
