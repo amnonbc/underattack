@@ -189,33 +189,39 @@ func decodeCF(resp *http.Response, dst any) error {
 	return nil
 }
 
-// findRule returns the ID of the bot check rule, or "" if it doesn't exist.
-func (a *app) findRule() (string, error) {
+type ruleInfo struct {
+	ID         string
+	Expression string
+}
+
+// findRule returns the bot check rule's ID and expression, or nil if it doesn't exist.
+func (a *app) findRule() (*ruleInfo, error) {
 	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s", a.zoneId, a.conf.RulesetID)
 	req, err := a.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	var data struct {
 		Rules []struct {
 			ID          string `json:"id"`
 			Description string `json:"description"`
+			Expression  string `json:"expression"`
 		} `json:"rules"`
 	}
 	if err := decodeCF(resp, &data); err != nil {
-		return "", err
+		return nil, err
 	}
 	for _, r := range data.Rules {
 		if r.Description == botCheckDescription {
-			return r.ID, nil
+			return &ruleInfo{ID: r.ID, Expression: r.Expression}, nil
 		}
 	}
-	return "", nil
+	return nil, nil
 }
 
 func (a *app) createRule(reason string) error {
@@ -279,20 +285,31 @@ func (a *app) deleteRule(ruleID string) error {
 }
 
 // ensureBotCheck creates the bot check rule (active=true) or removes it (active=false).
-// When activating, any existing rule is replaced so the expression stays current.
-// reason is logged alongside the creation to explain why it was triggered.
+// When activating, the rule is only replaced if today's date is not already in the
+// expression — avoiding churn on every run while the server stays under load.
+// reason is logged alongside creation to explain why it was triggered.
 func (a *app) ensureBotCheck(active bool, reason string) error {
-	ruleID, err := a.findRule()
+	info, err := a.findRule()
 	if err != nil {
 		return fmt.Errorf("finding bot check rule: %w", err)
 	}
-	if ruleID != "" {
-		if err := a.deleteRule(ruleID); err != nil {
-			return err
-		}
-	}
 	if active {
+		today := time.Now().Format("02-01-2006")
+		if info != nil && strings.Contains(info.Expression, today) {
+			return nil // expression is current, no need to recreate
+		}
+		if info != nil {
+			if err := a.deleteRule(info.ID); err != nil {
+				return err
+			}
+			if reason == "" {
+				reason = "date rollover"
+			}
+		}
 		return a.createRule(reason)
+	}
+	if info != nil {
+		return a.deleteRule(info.ID)
 	}
 	return nil
 }

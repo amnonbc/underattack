@@ -305,38 +305,41 @@ func TestNewRequest_InvalidURL(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFindRule_Found(t *testing.T) {
-	ts, _ := rulesetServer(t, "z1", "rs1", []testRule{{ID: "rule-1", Description: botCheckDescription}})
+	ts, _ := rulesetServer(t, "z1", "rs1", []testRule{{ID: "rule-1", Description: botCheckDescription, Expression: "expr"}})
 	a := appForServer(ts, "z1", "rs1")
-	id, err := a.findRule()
+	info, err := a.findRule()
 	if err != nil {
 		t.Fatalf("findRule error: %v", err)
 	}
-	if id != "rule-1" {
-		t.Errorf("findRule = %q, want %q", id, "rule-1")
+	if info == nil || info.ID != "rule-1" {
+		t.Errorf("findRule ID = %v, want rule-1", info)
+	}
+	if info.Expression != "expr" {
+		t.Errorf("findRule Expression = %q, want %q", info.Expression, "expr")
 	}
 }
 
 func TestFindRule_NotFound(t *testing.T) {
 	ts, _ := rulesetServer(t, "z2", "rs1", []testRule{{ID: "rule-1", Description: "some other rule"}})
 	a := appForServer(ts, "z2", "rs1")
-	id, err := a.findRule()
+	info, err := a.findRule()
 	if err != nil {
 		t.Fatalf("findRule error: %v", err)
 	}
-	if id != "" {
-		t.Errorf("findRule = %q, want empty string", id)
+	if info != nil {
+		t.Errorf("findRule = %v, want nil", info)
 	}
 }
 
 func TestFindRule_EmptyRuleset(t *testing.T) {
 	ts, _ := rulesetServer(t, "z3", "rs1", nil)
 	a := appForServer(ts, "z3", "rs1")
-	id, err := a.findRule()
+	info, err := a.findRule()
 	if err != nil {
 		t.Fatalf("findRule error: %v", err)
 	}
-	if id != "" {
-		t.Errorf("findRule = %q, want empty string", id)
+	if info != nil {
+		t.Errorf("findRule = %v, want nil", info)
 	}
 }
 
@@ -385,6 +388,19 @@ func TestEnsureBotCheck_DeletesRuleWhenInactive(t *testing.T) {
 	}
 	if len(*rules) != 0 {
 		t.Errorf("expected 0 rules after deactivation, got %d", len(*rules))
+	}
+}
+
+func TestEnsureBotCheck_NoChurnWhenTodayAlreadyInExpression(t *testing.T) {
+	today := time.Now().Format("02-01-2006")
+	current := testRule{ID: "rule-1", Description: botCheckDescription, Expression: "/" + today + "/"}
+	ts, rules := rulesetServer(t, "z7a", "rs1", []testRule{current})
+	a := appForServer(ts, "z7a", "rs1")
+	if err := a.ensureBotCheck(true, "test"); err != nil {
+		t.Fatalf("ensureBotCheck(true) error: %v", err)
+	}
+	if len(*rules) != 1 || (*rules)[0].ID != "rule-1" {
+		t.Error("rule should not have been replaced when today's date is already in expression")
 	}
 }
 
