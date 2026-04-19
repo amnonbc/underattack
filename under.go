@@ -7,11 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mitchellh/go-ps"
 
@@ -24,7 +26,6 @@ type Config struct {
 	DbName     string
 	DbUser     string
 	DbPassword string
-	RuleID     string
 	RulesetID  string
 }
 
@@ -45,7 +46,23 @@ func (a *app) loadConfig(fn string) error {
 		return err
 	}
 	defer f.Close()
-	return json.NewDecoder(f).Decode(&a.conf)
+	if err := json.NewDecoder(f).Decode(&a.conf); err != nil {
+		return err
+	}
+	var missing []string
+	if a.conf.ApiKey == "" {
+		missing = append(missing, "apiKey")
+	}
+	if a.conf.Domain == "" {
+		missing = append(missing, "domain")
+	}
+	if a.conf.RulesetID == "" {
+		missing = append(missing, "RulesetID")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("config missing required fields: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func loadAvg(text string) ([]float64, error) {
@@ -68,30 +85,25 @@ func loadAvg(text string) ([]float64, error) {
 }
 
 func (a *app) init() error {
-	zoneResp, err := a.NewRequest("GET", a.baseURL+"/zones", nil)
+	req, err := a.NewRequest(http.MethodGet, a.baseURL+"/zones", nil)
 	if err != nil {
 		return err
 	}
 
-	resp, err := a.client.Do(zoneResp)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	var data struct {
-		Result []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"result"`
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&data)
+	resp, err := a.client.Do(req)
 	if err != nil {
 		return err
 	}
 
-	for _, z := range data.Result {
+	var zones []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := decodeCF(resp, &zones); err != nil {
+		return err
+	}
+
+	for _, z := range zones {
 		if z.Name == a.conf.Domain {
 			a.zoneId = z.ID
 			return nil
@@ -125,92 +137,162 @@ func (a *app) NewRequest(method, url string, body io.Reader) (*http.Request, err
 	return req, nil
 }
 
-// getRuleState fetches the current enabled state of the rule
-func (a *app) getRuleState() (bool, error) {
-	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s",
-		a.zoneId, a.conf.RulesetID)
-
-	req, err := a.NewRequest("GET", url, nil)
-	if err != nil {
-		return false, err
+func buildExpression() string {
+	clauses := make([]string, 7)
+	for i := range 7 {
+		d := time.Now().AddDate(0, 0, -i).Format("02-01-2006")
+		clauses[i] = fmt.Sprintf(`http.request.uri.path contains "/%s/"`, d)
 	}
+	return `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"` +
+		" and not (" + strings.Join(clauses, " or ") + ")"
+}
 
+const botCheckDescription = "Bot check"
+
+type cfError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e cfError) Error() string {
+	return fmt.Sprintf("cloudflare error %d: %s", e.Code, e.Message)
+}
+
+// decodeCF checks the HTTP status and decodes a Cloudflare JSON envelope into
+// dst (the result field), returning an error if the status is non-2xx or
+// success=false.
+func decodeCF(resp *http.Response, dst any) error {
+	defer resp.Body.Close()
+	var env struct {
+		Success bool      `json:"success"`
+		Errors  []cfError `json:"errors"`
+		Result  any       `json:"result"`
+	}
+	if dst != nil {
+		env.Result = dst
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return fmt.Errorf("HTTP %d: %w", resp.StatusCode, err)
+	}
+	if resp.StatusCode/100 != 2 {
+		if len(env.Errors) > 0 {
+			return env.Errors[0]
+		}
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if !env.Success {
+		if len(env.Errors) > 0 {
+			return env.Errors[0]
+		}
+		return fmt.Errorf("cloudflare API returned success=false")
+	}
+	return nil
+}
+
+// findRule returns the ID of the bot check rule, or "" if it doesn't exist.
+func (a *app) findRule() (string, error) {
+	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s", a.zoneId, a.conf.RulesetID)
+	req, err := a.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return false, fmt.Errorf("Cloudflare API returned HTTP %d: %s", resp.StatusCode, respBody)
+		return "", err
 	}
 
 	var data struct {
-		Result struct {
-			Rules []struct {
-				ID      string `json:"id"`
-				Enabled bool   `json:"enabled"`
-			} `json:"rules"`
-		} `json:"result"`
+		Rules []struct {
+			ID          string `json:"id"`
+			Description string `json:"description"`
+		} `json:"rules"`
 	}
-
-	err = json.NewDecoder(resp.Body).Decode(&data)
-	if err != nil {
-		return false, err
+	if err := decodeCF(resp, &data); err != nil {
+		return "", err
 	}
-
-	for _, rule := range data.Result.Rules {
-		if rule.ID == a.conf.RuleID {
-			return rule.Enabled, nil
+	for _, r := range data.Rules {
+		if r.Description == botCheckDescription {
+			return r.ID, nil
 		}
 	}
-
-	return false, errors.New("rule not found in ruleset")
+	return "", nil
 }
 
-func (a *app) setRuleEnabled(enable bool) error {
-	// Check current state only when we need to make a change
-	currentState, err := a.getRuleState()
-	if err != nil {
-		log.Printf("Warning: could not fetch current rule state: %v", err)
-		log.Println("Proceeding with rule update anyway...")
-	} else if currentState == enable {
-		return nil
-	}
-
-	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules/%s", a.zoneId, a.conf.RulesetID, a.conf.RuleID)
-
+func (a *app) createRule() error {
+	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules", a.zoneId, a.conf.RulesetID)
 	payload := map[string]any{
 		"action":      "managed_challenge",
-		"description": "Bot check",
-		"enabled":     enable,
-		"expression":  "http.request.uri.path contains \"/articles/\" and http.request.method eq \"GET\" and not cf.client.bot and not http.cookie contains \"wordpress_logged_in\"",
+		"description": botCheckDescription,
+		"enabled":     true,
+		"expression":  buildExpression(),
 	}
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-
-	req, err := a.NewRequest("PATCH", url, bytes.NewBuffer(body))
+	req, err := a.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
 	if err != nil {
 		return err
 	}
-
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Cloudflare API returned HTTP %d: %s", resp.StatusCode, respBody)
+	var result struct {
+		Rules []struct {
+			ID          string `json:"id"`
+			Description string `json:"description"`
+			Expression  string `json:"expression"`
+		} `json:"rules"`
 	}
+	if err := decodeCF(resp, &result); err != nil {
+		return err
+	}
+	for _, r := range result.Rules {
+		if r.Description == botCheckDescription {
+			ruleURL := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules/%s", a.zoneId, a.conf.RulesetID, r.ID)
+			slog.Info("created bot check rule", "id", r.ID, "url", ruleURL)
+			slog.Debug("bot check rule details", "description", r.Description, "expression", r.Expression)
+			return nil
+		}
+	}
+	slog.Info("created bot check rule (id unknown)")
+	return nil
+}
 
-	log.Printf("Successfully %s bot check rule", map[bool]string{true: "enabled", false: "disabled"}[enable])
+func (a *app) deleteRule(ruleID string) error {
+	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules/%s", a.zoneId, a.conf.RulesetID, ruleID)
+	req, err := a.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	if err := decodeCF(resp, nil); err != nil {
+		return err
+	}
+	slog.Info("deleted bot check rule", "id", ruleID)
+	return nil
+}
 
+// ensureBotCheck creates the bot check rule (active=true) or removes it (active=false).
+// When activating, any existing rule is replaced so the expression stays current.
+func (a *app) ensureBotCheck(active bool) error {
+	ruleID, err := a.findRule()
+	if err != nil {
+		return fmt.Errorf("finding bot check rule: %w", err)
+	}
+	if ruleID != "" {
+		if err := a.deleteRule(ruleID); err != nil {
+			return err
+		}
+	}
+	if active {
+		return a.createRule()
+	}
 	return nil
 }
 
@@ -224,9 +306,11 @@ func newApp() *app {
 func main() {
 	a := newApp()
 
-	log.SetFlags(log.LstdFlags)
-
 	cf := flag.String("config", "/etc/botCheck.conf", "config file")
+	flag.BoolFunc("debug", "enable debug logging", func(string) error {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		return nil
+	})
 	flag.Float64Var(&a.maxLoad, "maxLoad", 4.5, "max load before enabling bot check rule")
 	flag.Float64Var(&a.minLoad, "minLoad", 1.0, "disable bot check rule if load is this low")
 	flag.IntVar(&a.maxProcs, "maxProc", 20, "max number of lsphp processes we allow to run")
@@ -234,11 +318,13 @@ func main() {
 	flag.Parse()
 
 	if err := a.loadConfig(*cf); err != nil {
-		log.Fatalln(err)
+		slog.Error("loading config", "err", err)
+		os.Exit(1)
 	}
 
 	if err := a.init(); err != nil {
-		log.Fatalln(err)
+		slog.Error("initialising", "err", err)
+		os.Exit(1)
 	}
 
 	a.doIt()
@@ -247,63 +333,55 @@ func main() {
 func (a *app) doIt() {
 	text, err := os.ReadFile(a.loadFile)
 	if err != nil {
-		log.Fatalln(err)
+		slog.Error("reading load file", "err", err)
+		os.Exit(1)
 	}
 
 	la, err := loadAvg(string(text))
 	if err != nil {
-		log.Fatalln(err)
+		slog.Error("parsing load average", "err", err)
+		os.Exit(1)
 	}
 
-	err = a.checkDb()
-	if err != nil {
-		log.Println("cannot connect to db:", err)
-		log.Println("enabling Cloudflare bot check rule due to DB failure")
-		err := a.setRuleEnabled(true)
-		if err != nil {
-			log.Fatalln("Failed to enable bot check rule:", err)
+	if err := a.checkDb(); err != nil {
+		slog.Warn("cannot connect to db, enabling bot check rule", "err", err)
+		if err := a.ensureBotCheck(true); err != nil {
+			slog.Error("failed to enable bot check rule", "err", err)
+			os.Exit(1)
 		}
 		return
 	}
 
 	lsphpCount, err := countProcesses("lsphp")
 	if err != nil {
-		log.Println("Warning: could not count lsphp processes:", err)
-	} else {
-		if lsphpCount > a.maxProcs {
-			log.Println("lsphp count:", lsphpCount, "- enabling bot check rule")
-			err := a.setRuleEnabled(true)
-			if err != nil {
-				log.Fatalln("Failed to enable bot check rule:", err)
-			}
-			return
+		slog.Warn("could not count lsphp processes", "err", err)
+	} else if lsphpCount > a.maxProcs {
+		slog.Info("lsphp count above threshold, enabling bot check rule", "count", lsphpCount)
+		if err := a.ensureBotCheck(true); err != nil {
+			slog.Error("failed to enable bot check rule", "err", err)
+			os.Exit(1)
 		}
+		return
 	}
 
 	if la[0] >= a.maxLoad {
-		log.Println("Load average is", la, "enabling bot check rule")
-		err := a.setRuleEnabled(true)
-		if err != nil {
-			log.Fatalln("Failed to enable bot check rule:", err)
+		slog.Debug("load average above threshold, enabling bot check rule", "load", la[0])
+		if err := a.ensureBotCheck(true); err != nil {
+			slog.Error("failed to enable bot check rule", "err", err)
+			os.Exit(1)
 		}
 		return
 	}
 
 	if allBelow(la, a.minLoad) {
-		// log.Println("Load average is below threshold, disabling bot check rule")
-		err := a.setRuleEnabled(false)
-		if err != nil {
-			log.Fatalln("Below threshold but failed to disable bot check rule:", err)
+		slog.Debug("load average below threshold, disabling bot check rule", "load", la[0])
+		if err := a.ensureBotCheck(false); err != nil {
+			slog.Error("failed to disable bot check rule", "err", err)
+			os.Exit(1)
 		}
-		return
 	}
 }
 
 func allBelow(a []float64, x float64) bool {
-	for _, v := range a {
-		if v >= x {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc(a, func(v float64) bool { return v >= x })
 }

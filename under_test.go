@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -17,62 +20,97 @@ func newTestApp() *app {
 	return &app{maxLoad: 4.5, minLoad: 1.0, maxProcs: 20}
 }
 
-// rulesetServer creates a fake Cloudflare API server. It tracks the enabled
-// state of a single rule and the number of PATCH calls received.
-// Returns the server, a pointer to the rule's enabled state, and a pointer to
-// the PATCH call count.
-func rulesetServer(t *testing.T, zoneID, rulesetID, ruleID string, initialEnabled bool) (*httptest.Server, *bool, *int) {
+type testRule struct {
+	ID          string
+	Description string
+	Expression  string
+}
+
+// rulesetServer creates a fake Cloudflare API server backed by an in-memory
+// rule list. It handles GET (list rules), POST (create rule), and DELETE
+// (delete rule). Returns the server and a pointer to the rule slice.
+func rulesetServer(t *testing.T, zoneID, rulesetID string, initial []testRule) (*httptest.Server, *[]testRule) {
 	t.Helper()
-	enabled := new(bool)
-	*enabled = initialEnabled
-	patchCount := new(int)
+	var mu sync.Mutex
+	rules := make([]testRule, len(initial))
+	copy(rules, initial)
+	nextID := 100
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/zones", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"result": []map[string]string{{"id": zoneID, "name": "example.com"}},
+			"success": true,
+			"result":  []map[string]string{{"id": zoneID, "name": "example.com"}},
 		})
 	})
 
-	mux.HandleFunc(fmt.Sprintf("/zones/%s/rulesets/%s", zoneID, rulesetID),
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"result": map[string]any{
-					"rules": []map[string]any{{"id": ruleID, "enabled": *enabled}},
-				},
-			})
-		})
+	rulesetPath := fmt.Sprintf("/zones/%s/rulesets/%s", zoneID, rulesetID)
+	mux.HandleFunc(rulesetPath, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		result := make([]map[string]any, len(rules))
+		for i, rule := range rules {
+			result[i] = map[string]any{"id": rule.ID, "description": rule.Description, "expression": rule.Expression}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"rules": result}})
+	})
 
-	mux.HandleFunc(fmt.Sprintf("/zones/%s/rulesets/%s/rules/%s", zoneID, rulesetID, ruleID),
-		func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPatch {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	rulesPath := fmt.Sprintf("/zones/%s/rulesets/%s/rules", zoneID, rulesetID)
+	mux.HandleFunc(rulesPath+"/", func(w http.ResponseWriter, r *http.Request) {
+		// DELETE /zones/{z}/rulesets/{rs}/rules/{id}
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ruleID := strings.TrimPrefix(r.URL.Path, rulesPath+"/")
+		mu.Lock()
+		defer mu.Unlock()
+		for i, rule := range rules {
+			if rule.ID == ruleID {
+				rules = append(rules[:i], rules[i+1:]...)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"rules": rules}})
 				return
 			}
-			*patchCount++
-			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
-			*enabled = body["enabled"].(bool)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"result": map[string]any{
-					"rules": []map[string]any{{"id": ruleID, "enabled": *enabled}},
-				},
-			})
+		}
+		http.Error(w, "rule not found", http.StatusNotFound)
+	})
+
+	mux.HandleFunc(rulesPath, func(w http.ResponseWriter, r *http.Request) {
+		// POST /zones/{z}/rulesets/{rs}/rules
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		defer mu.Unlock()
+		nextID++
+		rule := testRule{
+			ID:          fmt.Sprintf("rule-%d", nextID),
+			Description: body["description"].(string),
+			Expression:  body["expression"].(string),
+		}
+		rules = append(rules, rule)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"result": map[string]any{
+				"rules": []map[string]any{{"id": rule.ID, "description": rule.Description, "expression": rule.Expression}},
+			},
 		})
+	})
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return ts, enabled, patchCount
+	return ts, &rules
 }
 
-// appForServer wires an app to a test server: sets baseURL to ts.URL so all
-// CF URL construction resolves there, and sets client to ts.Client() so
-// requests are routed through the test server's transport.
-func appForServer(ts *httptest.Server, zoneID, rulesetID, ruleID string) *app {
+func appForServer(ts *httptest.Server, zoneID, rulesetID string) *app {
 	return &app{
 		maxLoad:  4.5,
 		minLoad:  1.0,
@@ -83,7 +121,6 @@ func appForServer(ts *httptest.Server, zoneID, rulesetID, ruleID string) *app {
 		conf: Config{
 			ApiKey:    "test-key",
 			RulesetID: rulesetID,
-			RuleID:    ruleID,
 		},
 	}
 }
@@ -101,7 +138,7 @@ func writeTempLoadFile(t *testing.T, content string) string {
 }
 
 func TestLoadConfig_Valid(t *testing.T) {
-	cfg := Config{Domain: "example.com", ApiKey: "key123", DbName: "mydb", DbUser: "user", DbPassword: "pass"}
+	cfg := Config{Domain: "example.com", ApiKey: "key123", DbName: "mydb", DbUser: "user", DbPassword: "pass", RulesetID: "rs1"}
 	data, _ := json.Marshal(cfg)
 	f, _ := os.CreateTemp("", "ua-cfg-*.json")
 	defer os.Remove(f.Name())
@@ -200,7 +237,6 @@ func TestAllBelow_AllUnder(t *testing.T) {
 }
 
 func TestAllBelow_OneEqual(t *testing.T) {
-	// allBelow uses >=, so a value equal to the threshold is not "below".
 	if allBelow([]float64{0.5, 1.0, 0.3}, 1.0) {
 		t.Error("expected false: 1.0 is not strictly below 1.0")
 	}
@@ -265,210 +301,215 @@ func TestNewRequest_InvalidURL(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// getRuleState
+// findRule
 // ---------------------------------------------------------------------------
 
-func TestGetRuleState_RuleEnabled(t *testing.T) {
-	const (
-		zoneID, rulesetID, ruleID = "z1", "rs1", "rule1"
-	)
-	ts, _, _ := rulesetServer(t, zoneID, rulesetID, ruleID, true)
-
-	a := appForServer(ts, zoneID, rulesetID, ruleID)
-	got, err := a.getRuleState()
+func TestFindRule_Found(t *testing.T) {
+	ts, _ := rulesetServer(t, "z1", "rs1", []testRule{{ID: "rule-1", Description: botCheckDescription}})
+	a := appForServer(ts, "z1", "rs1")
+	id, err := a.findRule()
 	if err != nil {
-		t.Fatalf("getRuleState error: %v", err)
+		t.Fatalf("findRule error: %v", err)
 	}
-	if !got {
-		t.Error("expected rule enabled=true")
+	if id != "rule-1" {
+		t.Errorf("findRule = %q, want %q", id, "rule-1")
 	}
 }
 
-func TestGetRuleState_RuleDisabled(t *testing.T) {
-	const (
-		zoneID, rulesetID, ruleID = "z2", "rs1", "rule1"
-	)
-	ts, _, _ := rulesetServer(t, zoneID, rulesetID, ruleID, false)
-
-	a := appForServer(ts, zoneID, rulesetID, ruleID)
-	got, err := a.getRuleState()
+func TestFindRule_NotFound(t *testing.T) {
+	ts, _ := rulesetServer(t, "z2", "rs1", []testRule{{ID: "rule-1", Description: "some other rule"}})
+	a := appForServer(ts, "z2", "rs1")
+	id, err := a.findRule()
 	if err != nil {
-		t.Fatalf("getRuleState error: %v", err)
+		t.Fatalf("findRule error: %v", err)
 	}
-	if got {
-		t.Error("expected rule enabled=false")
-	}
-}
-
-func TestGetRuleState_RuleNotFound(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"result": map[string]any{
-				"rules": []map[string]any{{"id": "other-rule", "enabled": true}},
-			},
-		})
-	}))
-	t.Cleanup(ts.Close)
-
-	a := appForServer(ts, "z3", "rs1", "missing-rule")
-	if _, err := a.getRuleState(); err == nil {
-		t.Error("expected error when rule not found, got nil")
+	if id != "" {
+		t.Errorf("findRule = %q, want empty string", id)
 	}
 }
 
-func TestGetRuleState_ServerError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(ts.Close)
-
-	a := appForServer(ts, "z4", "rs1", "rule1")
-	if _, err := a.getRuleState(); err == nil {
-		t.Error("expected error on HTTP 500, got nil")
+func TestFindRule_EmptyRuleset(t *testing.T) {
+	ts, _ := rulesetServer(t, "z3", "rs1", nil)
+	a := appForServer(ts, "z3", "rs1")
+	id, err := a.findRule()
+	if err != nil {
+		t.Fatalf("findRule error: %v", err)
+	}
+	if id != "" {
+		t.Errorf("findRule = %q, want empty string", id)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// setRuleEnabled
+// ensureBotCheck
 // ---------------------------------------------------------------------------
 
-func TestSetRuleEnabled_EnablesRule(t *testing.T) {
-	const (
-		zoneID, rulesetID, ruleID = "z5", "rs1", "rule1"
-	)
-	ts, enabled, patchCount := rulesetServer(t, zoneID, rulesetID, ruleID, false)
-
-	a := appForServer(ts, zoneID, rulesetID, ruleID)
-	if err := a.setRuleEnabled(true); err != nil {
-		t.Fatalf("setRuleEnabled(true) error: %v", err)
+func TestEnsureBotCheck_CreatesRuleWhenNoneExists(t *testing.T) {
+	ts, rules := rulesetServer(t, "z4", "rs1", nil)
+	a := appForServer(ts, "z4", "rs1")
+	if err := a.ensureBotCheck(true); err != nil {
+		t.Fatalf("ensureBotCheck(true) error: %v", err)
 	}
-	if !*enabled {
-		t.Error("expected rule enabled=true")
+	if len(*rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(*rules))
 	}
-	if *patchCount != 1 {
-		t.Errorf("patchCount = %d, want 1", *patchCount)
+	if (*rules)[0].Description != botCheckDescription {
+		t.Errorf("rule description = %q, want %q", (*rules)[0].Description, botCheckDescription)
 	}
 }
 
-func TestSetRuleEnabled_DisablesRule(t *testing.T) {
-	const (
-		zoneID, rulesetID, ruleID = "z6", "rs1", "rule1"
-	)
-	ts, enabled, patchCount := rulesetServer(t, zoneID, rulesetID, ruleID, true)
-
-	a := appForServer(ts, zoneID, rulesetID, ruleID)
-	if err := a.setRuleEnabled(false); err != nil {
-		t.Fatalf("setRuleEnabled(false) error: %v", err)
+func TestEnsureBotCheck_ReplacesExistingRuleToRefreshExpression(t *testing.T) {
+	stale := testRule{ID: "old-rule", Description: botCheckDescription, Expression: "old expression"}
+	ts, rules := rulesetServer(t, "z5", "rs1", []testRule{stale})
+	a := appForServer(ts, "z5", "rs1")
+	if err := a.ensureBotCheck(true); err != nil {
+		t.Fatalf("ensureBotCheck(true) error: %v", err)
 	}
-	if *enabled {
-		t.Error("expected rule enabled=false")
+	if len(*rules) != 1 {
+		t.Fatalf("expected 1 rule after replace, got %d", len(*rules))
 	}
-	if *patchCount != 1 {
-		t.Errorf("patchCount = %d, want 1", *patchCount)
+	if (*rules)[0].ID == "old-rule" {
+		t.Error("old rule should have been replaced")
 	}
-}
-
-func TestSetRuleEnabled_IdempotentWhenAlreadyEnabled(t *testing.T) {
-	const (
-		zoneID, rulesetID, ruleID = "z7", "rs1", "rule1"
-	)
-	ts, _, patchCount := rulesetServer(t, zoneID, rulesetID, ruleID, true)
-
-	a := appForServer(ts, zoneID, rulesetID, ruleID)
-	if err := a.setRuleEnabled(true); err != nil {
-		t.Fatalf("setRuleEnabled(true) error: %v", err)
-	}
-	if *patchCount != 0 {
-		t.Errorf("expected 0 PATCHes when already enabled, got %d", *patchCount)
+	if (*rules)[0].Expression == "old expression" {
+		t.Error("expression should have been updated")
 	}
 }
 
-func TestSetRuleEnabled_IdempotentWhenAlreadyDisabled(t *testing.T) {
-	const (
-		zoneID, rulesetID, ruleID = "z8", "rs1", "rule1"
-	)
-	ts, _, patchCount := rulesetServer(t, zoneID, rulesetID, ruleID, false)
-
-	a := appForServer(ts, zoneID, rulesetID, ruleID)
-	if err := a.setRuleEnabled(false); err != nil {
-		t.Fatalf("setRuleEnabled(false) error: %v", err)
+func TestEnsureBotCheck_DeletesRuleWhenInactive(t *testing.T) {
+	existing := testRule{ID: "rule-1", Description: botCheckDescription}
+	ts, rules := rulesetServer(t, "z6", "rs1", []testRule{existing})
+	a := appForServer(ts, "z6", "rs1")
+	if err := a.ensureBotCheck(false); err != nil {
+		t.Fatalf("ensureBotCheck(false) error: %v", err)
 	}
-	if *patchCount != 0 {
-		t.Errorf("expected 0 PATCHes when already disabled, got %d", *patchCount)
+	if len(*rules) != 0 {
+		t.Errorf("expected 0 rules after deactivation, got %d", len(*rules))
+	}
+}
+
+func TestEnsureBotCheck_NoopWhenInactiveAndNoRule(t *testing.T) {
+	ts, rules := rulesetServer(t, "z7", "rs1", nil)
+	a := appForServer(ts, "z7", "rs1")
+	if err := a.ensureBotCheck(false); err != nil {
+		t.Fatalf("ensureBotCheck(false) error: %v", err)
+	}
+	if len(*rules) != 0 {
+		t.Errorf("expected 0 rules, got %d", len(*rules))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildExpression
+// ---------------------------------------------------------------------------
+
+func TestBuildExpression_ContainsBaseConditions(t *testing.T) {
+	expr := buildExpression()
+	for _, want := range []string{
+		`http.request.uri.path contains "/articles/"`,
+		`http.request.method eq "GET"`,
+		`not cf.client.bot`,
+		`not http.cookie contains "wordpress_logged_in"`,
+	} {
+		if !strings.Contains(expr, want) {
+			t.Errorf("expression missing %q", want)
+		}
+	}
+}
+
+func TestBuildExpression_ExemptsRecentDates(t *testing.T) {
+	expr := buildExpression()
+	for i := range 7 {
+		d := time.Now().AddDate(0, 0, -i).Format("02-01-2006")
+		want := fmt.Sprintf(`"/%s/"`, d)
+		if !strings.Contains(expr, want) {
+			t.Errorf("expression missing exemption for date %s", d)
+		}
+	}
+}
+
+func TestBuildExpression_DoesNotExemptOldDate(t *testing.T) {
+	expr := buildExpression()
+	old := time.Now().AddDate(0, 0, -8).Format("02-01-2006")
+	if strings.Contains(expr, old) {
+		t.Errorf("expression should not exempt date 8 days ago (%s)", old)
+	}
+}
+
+func TestBuildExpression_HasSevenDateExemptions(t *testing.T) {
+	expr := buildExpression()
+	if !strings.Contains(expr, "not (") {
+		t.Error("expression missing 'not (' for date exemptions")
+	}
+	count := 0
+	for i := range 7 {
+		d := time.Now().AddDate(0, 0, -i).Format("02-01-2006")
+		if strings.Contains(expr, d) {
+			count++
+		}
+	}
+	if count != 7 {
+		t.Errorf("expected 7 date exemptions, found %d", count)
 	}
 }
 
 // ---------------------------------------------------------------------------
 // doIt — integration tests with a real load file and fake CF server.
-// checkDb will fail (no MySQL), which triggers setRuleEnabled(true) via the
-// DB-failure path. For the low-load and mid-range tests we need checkDb to
-// succeed; sql.Open + db.Close on an empty DSN succeeds without dialing,
-// so we leave DbUser/DbPassword empty.
 // ---------------------------------------------------------------------------
 
-func newDoItApp(t *testing.T, ts *httptest.Server, loadContent, zoneID, rulesetID, ruleID string) *app {
+func newDoItApp(t *testing.T, ts *httptest.Server, loadContent, zoneID, rulesetID string) *app {
 	t.Helper()
-	a := appForServer(ts, zoneID, rulesetID, ruleID)
+	a := appForServer(ts, zoneID, rulesetID)
 	a.loadFile = writeTempLoadFile(t, loadContent)
 	return a
 }
 
 func TestDoIt_HighLoadEnablesRule(t *testing.T) {
-	const (
-		zoneID, rulesetID, ruleID = "z9", "rs2", "rule2"
-	)
-	ts, enabled, _ := rulesetServer(t, zoneID, rulesetID, ruleID, false)
-
-	a := newDoItApp(t, ts, "10.00 8.00 6.00 5/200 12345", zoneID, rulesetID, ruleID)
+	ts, rules := rulesetServer(t, "z9", "rs2", nil)
+	a := newDoItApp(t, ts, "10.00 8.00 6.00 5/200 12345", "z9", "rs2")
 	a.doIt()
-
-	if !*enabled {
-		t.Error("expected rule enabled=true when load is above maxLoad")
+	if len(*rules) != 1 {
+		t.Errorf("expected 1 rule when load is above maxLoad, got %d", len(*rules))
 	}
 }
 
-func TestDoIt_LowLoadDisablesRule(t *testing.T) {
-	const (
-		zoneID, rulesetID, ruleID = "z10", "rs2", "rule2"
-	)
-	ts, enabled, _ := rulesetServer(t, zoneID, rulesetID, ruleID, true)
-
-	// Empty DB credentials: sql.Open + db.Close succeeds without a real server.
-	a := newDoItApp(t, ts, "0.10 0.20 0.30 1/100 12345", zoneID, rulesetID, ruleID)
+func TestDoIt_LowLoadDeletesRule(t *testing.T) {
+	existing := testRule{ID: "rule-1", Description: botCheckDescription}
+	ts, rules := rulesetServer(t, "z10", "rs2", []testRule{existing})
+	a := newDoItApp(t, ts, "0.10 0.20 0.30 1/100 12345", "z10", "rs2")
 	a.doIt()
-
-	if *enabled {
-		t.Error("expected rule enabled=false when load is below minLoad")
+	if len(*rules) != 0 {
+		t.Errorf("expected 0 rules when load is below minLoad, got %d", len(*rules))
 	}
 }
 
 func TestDoIt_MidRangeLoadNoChange(t *testing.T) {
-	// Load between minLoad (1.0) and maxLoad (4.5) — no PATCH expected.
-	const (
-		zoneID, rulesetID, ruleID = "z11", "rs2", "rule2"
-	)
-	ts, _, patchCount := rulesetServer(t, zoneID, rulesetID, ruleID, false)
-
-	a := newDoItApp(t, ts, "2.00 1.50 1.20 3/100 12345", zoneID, rulesetID, ruleID)
+	ts, rules := rulesetServer(t, "z11", "rs2", nil)
+	a := newDoItApp(t, ts, "2.00 1.50 1.20 3/100 12345", "z11", "rs2")
 	a.doIt()
-
-	if *patchCount != 0 {
-		t.Errorf("expected 0 PATCHes for mid-range load, got %d", *patchCount)
+	if len(*rules) != 0 {
+		t.Errorf("expected 0 rule changes for mid-range load, got %d rules", len(*rules))
 	}
 }
 
 func TestDoIt_ExactlyAtMaxLoadEnablesRule(t *testing.T) {
-	// la[0] >= maxLoad (4.5) must trigger enable.
-	const (
-		zoneID, rulesetID, ruleID = "z12", "rs2", "rule2"
-	)
-	ts, enabled, _ := rulesetServer(t, zoneID, rulesetID, ruleID, false)
-
-	a := newDoItApp(t, ts, "4.50 1.50 1.00 3/100 12345", zoneID, rulesetID, ruleID)
+	ts, rules := rulesetServer(t, "z12", "rs2", nil)
+	a := newDoItApp(t, ts, "4.50 1.50 1.00 3/100 12345", "z12", "rs2")
 	a.doIt()
+	if len(*rules) != 1 {
+		t.Errorf("expected 1 rule when load equals maxLoad, got %d", len(*rules))
+	}
+}
 
-	if !*enabled {
-		t.Error("expected rule enabled=true when load equals maxLoad")
+func TestDoIt_HighLoadReplacesStaleRule(t *testing.T) {
+	stale := testRule{ID: "stale", Description: botCheckDescription, Expression: "old expression"}
+	ts, rules := rulesetServer(t, "z13", "rs2", []testRule{stale})
+	a := newDoItApp(t, ts, "10.00 8.00 6.00 5/200 12345", "z13", "rs2")
+	a.doIt()
+	if len(*rules) != 1 {
+		t.Fatalf("expected 1 rule after replace, got %d", len(*rules))
+	}
+	if (*rules)[0].ID == "stale" {
+		t.Error("stale rule should have been replaced")
 	}
 }
