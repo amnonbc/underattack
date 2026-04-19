@@ -218,7 +218,7 @@ func (a *app) findRule() (string, error) {
 	return "", nil
 }
 
-func (a *app) createRule() error {
+func (a *app) createRule(reason string) error {
 	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules", a.zoneId, a.conf.RulesetID)
 	payload := map[string]any{
 		"action":      "managed_challenge",
@@ -252,12 +252,12 @@ func (a *app) createRule() error {
 	for _, r := range result.Rules {
 		if r.Description == botCheckDescription {
 			ruleURL := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules/%s", a.zoneId, a.conf.RulesetID, r.ID)
-			slog.Info("created bot check rule", "id", r.ID, "url", ruleURL)
+			slog.Info("created bot check rule", "reason", reason, "id", r.ID, "url", ruleURL)
 			slog.Debug("bot check rule details", "description", r.Description, "expression", r.Expression)
 			return nil
 		}
 	}
-	slog.Info("created bot check rule (id unknown)")
+	slog.Info("created bot check rule (id unknown)", "reason", reason)
 	return nil
 }
 
@@ -280,7 +280,8 @@ func (a *app) deleteRule(ruleID string) error {
 
 // ensureBotCheck creates the bot check rule (active=true) or removes it (active=false).
 // When activating, any existing rule is replaced so the expression stays current.
-func (a *app) ensureBotCheck(active bool) error {
+// reason is logged alongside the creation to explain why it was triggered.
+func (a *app) ensureBotCheck(active bool, reason string) error {
 	ruleID, err := a.findRule()
 	if err != nil {
 		return fmt.Errorf("finding bot check rule: %w", err)
@@ -291,7 +292,7 @@ func (a *app) ensureBotCheck(active bool) error {
 		}
 	}
 	if active {
-		return a.createRule()
+		return a.createRule(reason)
 	}
 	return nil
 }
@@ -345,7 +346,7 @@ func (a *app) doIt() {
 
 	if err := a.checkDb(); err != nil {
 		slog.Warn("cannot connect to db, enabling bot check rule", "err", err)
-		if err := a.ensureBotCheck(true); err != nil {
+		if err := a.ensureBotCheck(true, "db unavailable"); err != nil {
 			slog.Error("failed to enable bot check rule", "err", err)
 			os.Exit(1)
 		}
@@ -357,7 +358,7 @@ func (a *app) doIt() {
 		slog.Warn("could not count lsphp processes", "err", err)
 	} else if lsphpCount > a.maxProcs {
 		slog.Info("lsphp count above threshold, enabling bot check rule", "count", lsphpCount)
-		if err := a.ensureBotCheck(true); err != nil {
+		if err := a.ensureBotCheck(true, fmt.Sprintf("lsphp count %d", lsphpCount)); err != nil {
 			slog.Error("failed to enable bot check rule", "err", err)
 			os.Exit(1)
 		}
@@ -366,7 +367,7 @@ func (a *app) doIt() {
 
 	if la[0] >= a.maxLoad {
 		slog.Debug("load average above threshold, enabling bot check rule", "load", la[0])
-		if err := a.ensureBotCheck(true); err != nil {
+		if err := a.ensureBotCheck(true, fmt.Sprintf("load %.2f", la[0])); err != nil {
 			slog.Error("failed to enable bot check rule", "err", err)
 			os.Exit(1)
 		}
@@ -375,7 +376,7 @@ func (a *app) doIt() {
 
 	if allBelow(la, a.minLoad) {
 		slog.Debug("load average below threshold, disabling bot check rule", "load", la[0])
-		if err := a.ensureBotCheck(false); err != nil {
+		if err := a.ensureBotCheck(false, ""); err != nil {
 			slog.Error("failed to disable bot check rule", "err", err)
 			os.Exit(1)
 		}

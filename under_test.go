@@ -347,7 +347,7 @@ func TestFindRule_EmptyRuleset(t *testing.T) {
 func TestEnsureBotCheck_CreatesRuleWhenNoneExists(t *testing.T) {
 	ts, rules := rulesetServer(t, "z4", "rs1", nil)
 	a := appForServer(ts, "z4", "rs1")
-	if err := a.ensureBotCheck(true); err != nil {
+	if err := a.ensureBotCheck(true, "test"); err != nil {
 		t.Fatalf("ensureBotCheck(true) error: %v", err)
 	}
 	if len(*rules) != 1 {
@@ -362,7 +362,7 @@ func TestEnsureBotCheck_ReplacesExistingRuleToRefreshExpression(t *testing.T) {
 	stale := testRule{ID: "old-rule", Description: botCheckDescription, Expression: "old expression"}
 	ts, rules := rulesetServer(t, "z5", "rs1", []testRule{stale})
 	a := appForServer(ts, "z5", "rs1")
-	if err := a.ensureBotCheck(true); err != nil {
+	if err := a.ensureBotCheck(true, "test"); err != nil {
 		t.Fatalf("ensureBotCheck(true) error: %v", err)
 	}
 	if len(*rules) != 1 {
@@ -380,7 +380,7 @@ func TestEnsureBotCheck_DeletesRuleWhenInactive(t *testing.T) {
 	existing := testRule{ID: "rule-1", Description: botCheckDescription}
 	ts, rules := rulesetServer(t, "z6", "rs1", []testRule{existing})
 	a := appForServer(ts, "z6", "rs1")
-	if err := a.ensureBotCheck(false); err != nil {
+	if err := a.ensureBotCheck(false, ""); err != nil {
 		t.Fatalf("ensureBotCheck(false) error: %v", err)
 	}
 	if len(*rules) != 0 {
@@ -391,7 +391,7 @@ func TestEnsureBotCheck_DeletesRuleWhenInactive(t *testing.T) {
 func TestEnsureBotCheck_NoopWhenInactiveAndNoRule(t *testing.T) {
 	ts, rules := rulesetServer(t, "z7", "rs1", nil)
 	a := appForServer(ts, "z7", "rs1")
-	if err := a.ensureBotCheck(false); err != nil {
+	if err := a.ensureBotCheck(false, ""); err != nil {
 		t.Fatalf("ensureBotCheck(false) error: %v", err)
 	}
 	if len(*rules) != 0 {
