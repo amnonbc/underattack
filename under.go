@@ -43,6 +43,7 @@ type app struct {
 	dateFormat string
 }
 
+// loadConfig reads and validates the JSON config file at fn.
 func (a *app) loadConfig(fn string) error {
 	f, err := os.Open(fn)
 	if err != nil {
@@ -68,6 +69,7 @@ func (a *app) loadConfig(fn string) error {
 	return nil
 }
 
+// loadAvg parses the first three space-separated floats from a /proc/loadavg string.
 func loadAvg(text string) ([]float64, error) {
 	var res []float64
 	fields := strings.Fields(text)
@@ -87,7 +89,9 @@ func loadAvg(text string) ([]float64, error) {
 	return res, nil
 }
 
-func (a *app) init() error {
+// getZoneID looks up the Cloudflare zone ID for the configured domain, and stores the result in
+// a.zoneId.
+func (a *app) getZoneID() error {
 	req, err := a.NewRequest(http.MethodGet, a.cfURL("zones"), nil)
 	if err != nil {
 		return err
@@ -116,6 +120,7 @@ func (a *app) init() error {
 	return errors.New("zone ID not found for domain " + a.conf.Domain)
 }
 
+// countProcesses returns the number of running processes whose executable name matches pattern.
 func countProcesses(pattern string) (int, error) {
 	procs, err := ps.Processes()
 	if err != nil {
@@ -130,6 +135,7 @@ func countProcesses(pattern string) (int, error) {
 	return n, nil
 }
 
+// cfURL builds a Cloudflare API URL by joining baseURL with the given path segments.
 func (a *app) cfURL(segments ...string) string {
 	u, err := url.JoinPath(a.baseURL, segments...)
 	if err != nil {
@@ -138,6 +144,7 @@ func (a *app) cfURL(segments ...string) string {
 	return u
 }
 
+// NewRequest creates an HTTP request with Cloudflare authentication headers set.
 func (a *app) NewRequest(method, endpoint string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequest(method, endpoint, body)
 	if err != nil {
@@ -148,6 +155,8 @@ func (a *app) NewRequest(method, endpoint string, body io.Reader) (*http.Request
 	return req, nil
 }
 
+// buildExpression returns the Cloudflare WAF rule expression that challenges bots
+// on article pages, exempting articles published within the configured date window.
 func (a *app) buildExpression() string {
 	base := `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
 	if a.exemptDays == 0 {
@@ -186,14 +195,14 @@ func decodeCF(resp *http.Response, dst any) error {
 	if dst != nil {
 		env.Result = dst
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return fmt.Errorf("HTTP %d: %w", resp.StatusCode, err)
-	}
 	if resp.StatusCode/100 != 2 {
 		if len(env.Errors) > 0 {
 			return env.Errors[0]
 		}
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return fmt.Errorf("HTTP %d: could not decode CF response - %w", resp.StatusCode, err)
 	}
 	if !env.Success {
 		if len(env.Errors) > 0 {
@@ -238,6 +247,7 @@ func (a *app) findRule() (*ruleInfo, error) {
 	return nil, nil
 }
 
+// createRule creates the bot check WAF rule in Cloudflare with a fresh expression.
 func (a *app) createRule(reason string) error {
 	payload := map[string]any{
 		"action":      "managed_challenge",
@@ -280,6 +290,7 @@ func (a *app) createRule(reason string) error {
 	return nil
 }
 
+// deleteRule removes the WAF rule with the given ID from the configured ruleset.
 func (a *app) deleteRule(ruleID string) error {
 	req, err := a.NewRequest(http.MethodDelete, a.cfURL("zones", a.zoneId, "rulesets", a.conf.RulesetID, "rules", ruleID), nil)
 	if err != nil {
@@ -328,6 +339,7 @@ func (a *app) ensureBotCheck(active bool, reason string) error {
 	return nil
 }
 
+// newApp returns an app with production defaults.
 func newApp() *app {
 	return &app{
 		client:     http.DefaultClient,
@@ -358,7 +370,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := a.init(); err != nil {
+	if err := a.getZoneID(); err != nil {
 		slog.Error("initialising", "err", err)
 		os.Exit(1)
 	}
@@ -366,6 +378,7 @@ func main() {
 	a.doIt()
 }
 
+// doIt checks server health and creates or removes the bot check rule accordingly.
 func (a *app) doIt() {
 	text, err := os.ReadFile(a.loadFile)
 	if err != nil {
@@ -418,6 +431,7 @@ func (a *app) doIt() {
 	}
 }
 
+// allBelow reports whether all values in a are strictly less than x.
 func allBelow(a []float64, x float64) bool {
 	return !slices.ContainsFunc(a, func(v float64) bool { return v >= x })
 }
