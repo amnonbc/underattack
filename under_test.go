@@ -435,12 +435,21 @@ func TestBuildExpression_ContainsBaseConditions(t *testing.T) {
 
 func TestBuildExpression_ExemptsRecentDates(t *testing.T) {
 	expr := buildExpression()
-	for i := range 7 {
-		d := time.Now().AddDate(0, 0, -i).Format("02-01-2006")
+	// tomorrow through 7 days ago (9 dates total)
+	for i := range 9 {
+		d := time.Now().AddDate(0, 0, 1-i).Format("02-01-2006")
 		want := fmt.Sprintf(`"/%s/"`, d)
 		if !strings.Contains(expr, want) {
 			t.Errorf("expression missing exemption for date %s", d)
 		}
+	}
+}
+
+func TestBuildExpression_ExemptsTomorrow(t *testing.T) {
+	expr := buildExpression()
+	tomorrow := time.Now().AddDate(0, 0, 1).Format("02-01-2006")
+	if !strings.Contains(expr, tomorrow) {
+		t.Errorf("expression should exempt tomorrow (%s) for timezone offset", tomorrow)
 	}
 }
 
@@ -452,20 +461,20 @@ func TestBuildExpression_DoesNotExemptOldDate(t *testing.T) {
 	}
 }
 
-func TestBuildExpression_HasSevenDateExemptions(t *testing.T) {
+func TestBuildExpression_HasNineDateExemptions(t *testing.T) {
 	expr := buildExpression()
 	if !strings.Contains(expr, "not (") {
 		t.Error("expression missing 'not (' for date exemptions")
 	}
 	count := 0
-	for i := range 7 {
-		d := time.Now().AddDate(0, 0, -i).Format("02-01-2006")
+	for i := range 9 {
+		d := time.Now().AddDate(0, 0, 1-i).Format("02-01-2006")
 		if strings.Contains(expr, d) {
 			count++
 		}
 	}
-	if count != 7 {
-		t.Errorf("expected 7 date exemptions, found %d", count)
+	if count != 9 {
+		t.Errorf("expected 9 date exemptions, found %d", count)
 	}
 }
 

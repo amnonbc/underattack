@@ -138,9 +138,10 @@ func (a *app) NewRequest(method, url string, body io.Reader) (*http.Request, err
 }
 
 func buildExpression() string {
-	clauses := make([]string, 7)
-	for i := range 7 {
-		d := time.Now().AddDate(0, 0, -i).Format("02-01-2006")
+	now := time.Now()
+	clauses := make([]string, 9)
+	for i := range 9 {
+		d := now.AddDate(0, 0, 1-i).Format("02-01-2006") // tomorrow through 7 days ago
 		clauses[i] = fmt.Sprintf(`http.request.uri.path contains "/%s/"`, d)
 	}
 	return `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"` +
@@ -296,7 +297,8 @@ func (a *app) ensureBotCheck(active bool, reason string) error {
 	if active {
 		today := time.Now().Format("02-01-2006")
 		if info != nil && strings.Contains(info.Expression, today) {
-			return nil // expression is current, no need to recreate
+			slog.Info("bot check rule already current, skipping", "id", info.ID, "reason", reason)
+			return nil
 		}
 		if info != nil {
 			if err := a.deleteRule(info.ID); err != nil {
