@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -87,7 +88,7 @@ func loadAvg(text string) ([]float64, error) {
 }
 
 func (a *app) init() error {
-	req, err := a.NewRequest(http.MethodGet, a.baseURL+"/zones", nil)
+	req, err := a.NewRequest(http.MethodGet, a.cfURL("zones"), nil)
 	if err != nil {
 		return err
 	}
@@ -129,8 +130,16 @@ func countProcesses(pattern string) (int, error) {
 	return n, nil
 }
 
-func (a *app) NewRequest(method, url string, body io.Reader) (*http.Request, error) {
-	req, err := http.NewRequest(method, url, body)
+func (a *app) cfURL(segments ...string) string {
+	u, err := url.JoinPath(a.baseURL, segments...)
+	if err != nil {
+		panic(err) // only fires if baseURL is malformed
+	}
+	return u
+}
+
+func (a *app) NewRequest(method, endpoint string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -202,8 +211,7 @@ type ruleInfo struct {
 
 // findRule returns the bot check rule's ID and expression, or nil if it doesn't exist.
 func (a *app) findRule() (*ruleInfo, error) {
-	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s", a.zoneId, a.conf.RulesetID)
-	req, err := a.NewRequest(http.MethodGet, url, nil)
+	req, err := a.NewRequest(http.MethodGet, a.cfURL("zones", a.zoneId, "rulesets", a.conf.RulesetID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +239,6 @@ func (a *app) findRule() (*ruleInfo, error) {
 }
 
 func (a *app) createRule(reason string) error {
-	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules", a.zoneId, a.conf.RulesetID)
 	payload := map[string]any{
 		"action":      "managed_challenge",
 		"description": botCheckDescription,
@@ -242,7 +249,7 @@ func (a *app) createRule(reason string) error {
 	if err != nil {
 		return err
 	}
-	req, err := a.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
+	req, err := a.NewRequest(http.MethodPost, a.cfURL("zones", a.zoneId, "rulesets", a.conf.RulesetID, "rules"), bytes.NewBuffer(body))
 	if err != nil {
 		return err
 	}
@@ -263,7 +270,7 @@ func (a *app) createRule(reason string) error {
 	}
 	for _, r := range result.Rules {
 		if r.Description == botCheckDescription {
-			ruleURL := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules/%s", a.zoneId, a.conf.RulesetID, r.ID)
+			ruleURL := a.cfURL("zones", a.zoneId, "rulesets", a.conf.RulesetID, "rules", r.ID)
 			slog.Info("created bot check rule", "reason", reason, "id", r.ID, "url", ruleURL)
 			slog.Debug("bot check rule details", "description", r.Description, "expression", r.Expression)
 			return nil
@@ -274,8 +281,7 @@ func (a *app) createRule(reason string) error {
 }
 
 func (a *app) deleteRule(ruleID string) error {
-	url := fmt.Sprintf(a.baseURL+"/zones/%s/rulesets/%s/rules/%s", a.zoneId, a.conf.RulesetID, ruleID)
-	req, err := a.NewRequest(http.MethodDelete, url, nil)
+	req, err := a.NewRequest(http.MethodDelete, a.cfURL("zones", a.zoneId, "rulesets", a.conf.RulesetID, "rules", ruleID), nil)
 	if err != nil {
 		return err
 	}

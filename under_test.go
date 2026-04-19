@@ -255,6 +255,24 @@ func TestAllBelow_EmptySlice(t *testing.T) {
 // NewRequest
 // ---------------------------------------------------------------------------
 
+func TestCfURL(t *testing.T) {
+	a := &app{baseURL: "https://api.cloudflare.com/client/v4"}
+	cases := []struct {
+		segments []string
+		want     string
+	}{
+		{[]string{"zones"}, "https://api.cloudflare.com/client/v4/zones"},
+		{[]string{"zones", "zoneID", "rulesets", "rulesetID"}, "https://api.cloudflare.com/client/v4/zones/zoneID/rulesets/rulesetID"},
+		{[]string{"zones", "zoneID", "rulesets", "rulesetID", "rules"}, "https://api.cloudflare.com/client/v4/zones/zoneID/rulesets/rulesetID/rules"},
+		{[]string{"zones", "zoneID", "rulesets", "rulesetID", "rules", "ruleID"}, "https://api.cloudflare.com/client/v4/zones/zoneID/rulesets/rulesetID/rules/ruleID"},
+	}
+	for _, tc := range cases {
+		if got := a.cfURL(tc.segments...); got != tc.want {
+			t.Errorf("cfURL(%v) = %q, want %q", tc.segments, got, tc.want)
+		}
+	}
+}
+
 func TestNewRequest_SetsAuthHeader(t *testing.T) {
 	a := newTestApp()
 	a.conf.ApiKey = "my-secret-key"
