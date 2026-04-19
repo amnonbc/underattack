@@ -316,6 +316,7 @@ func (a *app) ensureBotCheck(active bool, reason string) error {
 		return a.createRule(reason)
 	}
 	if info != nil {
+		slog.Info("deleting bot check rule", "id", info.ID, "reason", reason)
 		return a.deleteRule(info.ID)
 	}
 	return nil
@@ -404,7 +405,7 @@ func (a *app) doIt() {
 
 	if allBelow(la, a.minLoad) {
 		slog.Debug("load average below threshold, disabling bot check rule", "load", la[0])
-		if err := a.ensureBotCheck(false, ""); err != nil {
+		if err := a.ensureBotCheck(false, "load average below threshold"); err != nil {
 			slog.Error("failed to disable bot check rule", "err", err)
 			os.Exit(1)
 		}
