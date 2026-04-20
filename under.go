@@ -23,12 +23,14 @@ import (
 )
 
 type Config struct {
-	Domain     string
-	ApiKey     string
-	DbName     string
-	DbUser     string
-	DbPassword string
-	RulesetID  string
+	Domain       string
+	ApiKey       string
+	DbName       string
+	DbUser       string
+	DbPassword   string
+	RulesetID    string
+	MetricsURL   string // Grafana Cloud InfluxDB write endpoint (optional)
+	MetricsToken string // Grafana Cloud API token
 }
 
 type app struct {
@@ -395,12 +397,16 @@ func (a *app) doIt() {
 		os.Exit(1)
 	}
 
+	var ruleEnabled bool
+	defer func() { a.pushMetric(ruleEnabled) }()
+
 	if err := a.checkDb(); err != nil {
 		slog.Warn("cannot connect to db, enabling bot check rule", "err", err)
 		if err := a.ensureBotCheck(true, "db unavailable"); err != nil {
 			slog.Error("failed to enable bot check rule", "err", err)
 			os.Exit(1)
 		}
+		ruleEnabled = true
 		return
 	}
 
@@ -413,6 +419,7 @@ func (a *app) doIt() {
 			slog.Error("failed to enable bot check rule", "err", err)
 			os.Exit(1)
 		}
+		ruleEnabled = true
 		return
 	}
 
@@ -422,6 +429,7 @@ func (a *app) doIt() {
 			slog.Error("failed to enable bot check rule", "err", err)
 			os.Exit(1)
 		}
+		ruleEnabled = true
 		return
 	}
 
@@ -431,6 +439,13 @@ func (a *app) doIt() {
 			slog.Error("failed to disable bot check rule", "err", err)
 			os.Exit(1)
 		}
+		ruleEnabled = false
+		return
+	}
+
+	// Mid-range load: no change — check current state for metrics.
+	if info, err := a.findRule(); err == nil {
+		ruleEnabled = info != nil
 	}
 }
 

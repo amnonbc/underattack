@@ -58,6 +58,17 @@ The Cloudflare API key requires **Zone:Read** and **Zone WAF:Edit** permissions.
 The ruleset ID can be found via `GET /zones/{zone_id}/rulesets` or in the
 Cloudflare dashboard under Security → WAF → Custom Rules.
 
+## Monitoring
+
+When `MetricsURL` and `MetricsToken` are configured, the tool pushes metrics to
+Grafana Cloud showing when the bot check rule is enabled. View the dashboard at:
+
+https://amnonbc.grafana.net/d/bot-check-dashboard/bot-check-rule-status?orgId=1&from=now-3h&to=now&timezone=UTC
+
+The dashboard displays:
+- **Daily Average**: Percentage of each day the rule was enabled (long-term trends)
+- **Hourly Average**: Percentage of each hour the rule was enabled (operational detail)
+
 ## Cross-compiling for Linux
 
 ```
