@@ -432,14 +432,16 @@ func (a *app) doIt() {
 	var ruleEnabled bool
 	var phpCount int
 	defer func() {
-		metrics := map[string]float64{
-			"bot_check_rule_enabled": 0,
-			"load_average":            la[0],
-			"memory_percent":          memPct,
-			"php_process_count":       float64(phpCount),
-		}
+		// bot_check_rule_active_seconds increments by 60 (1 min interval) when rule is active
+		ruleActiveSeconds := 0.0
 		if ruleEnabled {
-			metrics["bot_check_rule_enabled"] = 1
+			ruleActiveSeconds = 60
+		}
+		metrics := map[string]float64{
+			"bot_check_rule_active_seconds": ruleActiveSeconds,
+			"load_average":                  la[0],
+			"memory_percent":                memPct,
+			"php_process_count":             float64(phpCount),
 		}
 		a.pushMetrics(metrics)
 	}()

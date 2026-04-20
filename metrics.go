@@ -16,6 +16,8 @@ func (a *app) pushMetrics(values map[string]float64) {
 		return
 	}
 
+	slog.Debug("pushMetrics", "metrics", values)
+
 	now := time.Now().UTC().UnixNano()
 	metrics := make([]any, 0, len(values))
 
@@ -68,5 +70,7 @@ func (a *app) pushMetrics(values map[string]float64) {
 
 	if resp.StatusCode/100 != 2 {
 		slog.Warn("pushMetrics: unexpected status", "status", resp.Status)
+	} else {
+		slog.Debug("pushMetrics: sent", "status", resp.Status)
 	}
 }

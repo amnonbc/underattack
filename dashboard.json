@@ -48,9 +48,9 @@
         "tooltip": {"mode": "single"}
       },
       "targets": [
-        {"expr": "avg_over_time(bot_check_rule_enabled[1d])", "refId": "A", "legendFormat": "Daily Average"}
+        {"expr": "increase(bot_check_rule_active_seconds[1d]) / 86400 * 100", "refId": "A", "legendFormat": "Daily %"}
       ],
-      "title": "Bot Check Rule - Daily Average",
+      "title": "Bot Check Rule - Daily %",
       "type": "timeseries"
     },
     {
@@ -83,9 +83,9 @@
         "tooltip": {"mode": "single"}
       },
       "targets": [
-        {"expr": "avg_over_time(bot_check_rule_enabled[1h])", "refId": "A", "legendFormat": "Hourly Average"}
+        {"expr": "increase(bot_check_rule_active_seconds[1h]) / 3600 * 100", "refId": "A", "legendFormat": "Hourly %"}
       ],
-      "title": "Bot Check Rule - Hourly Average",
+      "title": "Bot Check Rule - Hourly %",
       "type": "timeseries"
     },
     {
