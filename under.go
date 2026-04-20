@@ -40,6 +40,7 @@ type app struct {
 	client     *http.Client
 	baseURL    string // override for testing; defaults to cloudflare base
 	exemptDays int
+	dateFormat string
 }
 
 // loadConfig reads and validates the JSON config file at fn.
@@ -154,64 +155,23 @@ func (a *app) NewRequest(method, endpoint string, body io.Reader) (*http.Request
 	return req, nil
 }
 
-// exemptExpression returns a regex that matches URL paths containing any date in
-// the window [lastDay, lastDay - numDays + 1], grouped by month-year.
-// Returns an empty string when numDays is zero.
-func exemptExpression(lastDay time.Time, numDays int) string {
-	if numDays == 0 {
-		return ""
-	}
-
-	type group struct {
-		monthYear string
-		days      []string
-	}
-	var groups []group
-	for i := range numDays {
-		d := lastDay.AddDate(0, 0, -i)
-		day := d.Format("02")
-		my := d.Format("01-2006")
-		if len(groups) == 0 || groups[len(groups)-1].monthYear != my {
-			groups = append(groups, group{monthYear: my})
-		}
-		lastMonth := &groups[len(groups)-1]
-		lastMonth.days = append(lastMonth.days, day)
-	}
-
-	var parts []string
-	for _, g := range groups {
-		var dayPart string
-		if len(g.days) == 1 {
-			dayPart = g.days[0]
-		} else {
-			dayPart = "(" + strings.Join(g.days, "|") + ")"
-		}
-		parts = append(parts, dayPart+"-"+g.monthYear)
-	}
-
-	if len(parts) == 1 {
-		return "/" + parts[0] + "/"
-	}
-	return "/(" + strings.Join(parts, "|") + ")/"
-}
-
 // buildExpression returns the Cloudflare WAF rule expression that challenges bots
 // on article pages, exempting articles published within the configured date window.
-// now is passed explicitly to allow deterministic testing.
-func (a *app) buildExpression(now time.Time) string {
-	var b strings.Builder
-	b.WriteString(`http.request.uri.path contains "/articles/" and http.request.method eq "GET"`)
-	b.WriteString(` and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`)
-	if re := exemptExpression(now.AddDate(0, 0, 1), a.exemptDays); re != "" {
-		b.WriteString(` and not http.request.uri.path matches "`)
-		b.WriteString(re)
-		b.WriteString(`"`)
+func (a *app) buildExpression() string {
+	base := `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
+	if a.exemptDays == 0 {
+		return base
 	}
-	return b.String()
+	now := time.Now()
+	clauses := make([]string, a.exemptDays)
+	for i := range a.exemptDays {
+		d := now.AddDate(0, 0, 1-i).Format(a.dateFormat) // tomorrow through (exemptDays-2) days ago
+		clauses[i] = fmt.Sprintf(`http.request.uri.path contains "/%s/"`, d)
+	}
+	return base + " and not (" + strings.Join(clauses, " or ") + ")"
 }
 
 const botCheckDescription = "Bot check"
-const dateFormat = "02-01-2006"
 
 type cfError struct {
 	Code    int    `json:"code"`
@@ -235,14 +195,20 @@ func decodeCF(resp *http.Response, dst any) error {
 	if dst != nil {
 		env.Result = dst
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return fmt.Errorf("HTTP %d: could not decode CF response: %w", resp.StatusCode, err)
-	}
-	if resp.StatusCode/100 != 2 || !env.Success {
+	if resp.StatusCode/100 != 2 {
 		if len(env.Errors) > 0 {
 			return env.Errors[0]
 		}
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return fmt.Errorf("HTTP %d: could not decode CF response - %w", resp.StatusCode, err)
+	}
+	if !env.Success {
+		if len(env.Errors) > 0 {
+			return env.Errors[0]
+		}
+		return fmt.Errorf("cloudflare API returned success=false")
 	}
 	return nil
 }
@@ -287,7 +253,7 @@ func (a *app) createRule(reason string) error {
 		"action":      "managed_challenge",
 		"description": botCheckDescription,
 		"enabled":     true,
-		"expression":  a.buildExpression(time.Now()),
+		"expression":  a.buildExpression(),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -351,7 +317,7 @@ func (a *app) ensureBotCheck(active bool, reason string) error {
 		return fmt.Errorf("finding bot check rule: %w", err)
 	}
 	if active {
-		today := time.Now().Format(dateFormat)
+		today := time.Now().Format(a.dateFormat)
 		if info != nil && strings.Contains(info.Expression, today) {
 			slog.Info("bot check rule already current, skipping", "id", info.ID, "reason", reason)
 			return nil
@@ -379,6 +345,7 @@ func newApp() *app {
 		client:     http.DefaultClient,
 		baseURL:    "https://api.cloudflare.com/client/v4",
 		exemptDays: 9,
+		dateFormat: "02-01-2006",
 	}
 }
 
@@ -391,7 +358,7 @@ func main() {
 		return nil
 	})
 	flag.IntVar(&a.exemptDays, "exemptDays", 9, "number of days (including tomorrow) to exempt from bot check")
-
+	flag.StringVar(&a.dateFormat, "dateFormat", "02-01-2006", "Go time format for dates in article URLs")
 	flag.Float64Var(&a.maxLoad, "maxLoad", 4.5, "max load before enabling bot check rule")
 	flag.Float64Var(&a.minLoad, "minLoad", 1.0, "disable bot check rule if load is this low")
 	flag.IntVar(&a.maxProcs, "maxProc", 20, "max number of lsphp processes we allow to run")
