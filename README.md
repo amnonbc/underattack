@@ -60,14 +60,22 @@ Cloudflare dashboard under Security → WAF → Custom Rules.
 
 ## Monitoring
 
-When `MetricsURL` and `MetricsToken` are configured, the tool pushes metrics to
-Grafana Cloud showing when the bot check rule is enabled. View the dashboard at:
+When `MetricsURL` and `MetricsToken` are configured, the tool pushes the following
+metrics to Grafana Cloud every 5 minutes (via cron):
+- `bot_check_rule_enabled` (0 or 1)
+- `load_average` (1-minute load)
+- `memory_percent` (0-100)
+- `php_process_count`
+
+View the dashboard at:
 
 https://amnonbc.grafana.net/d/bot-check-dashboard/bot-check-rule-status?orgId=1&from=now-3h&to=now&timezone=UTC
 
 The dashboard displays:
-- **Daily Average**: Percentage of each day the rule was enabled (long-term trends)
-- **Hourly Average**: Percentage of each hour the rule was enabled (operational detail)
+- **Bot Check Rule**: Daily and hourly percentage enabled
+- **CPU Load Average**: 1-minute load average trend
+- **Memory Usage**: Memory utilization percentage
+- **PHP Process Count**: Active lsphp worker processes
 
 ## Cross-compiling for Linux
 
