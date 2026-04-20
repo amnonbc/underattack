@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -434,63 +435,160 @@ func TestEnsureBotCheck_NoopWhenInactiveAndNoRule(t *testing.T) {
 // buildExpression
 // ---------------------------------------------------------------------------
 
-func TestBuildExpression_ContainsBaseConditions(t *testing.T) {
-	expr := newApp().buildExpression()
-	for _, want := range []string{
-		`http.request.uri.path contains "/articles/"`,
-		`http.request.method eq "GET"`,
-		`not cf.client.bot`,
-		`not http.cookie contains "wordpress_logged_in"`,
-	} {
-		if !strings.Contains(expr, want) {
-			t.Errorf("expression missing %q", want)
+func TestBuildExpression(t *testing.T) {
+	now := date(2026, 4, 20)
+	a := newApp()
+
+	cases := []struct {
+		name       string
+		exemptDays int
+		want       string
+	}{
+		{
+			name:       "zero exempt days — no matches clause",
+			exemptDays: 0,
+			want:       `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`,
+		},
+		{
+			name:       "one exempt day — matches tomorrow",
+			exemptDays: 1,
+			want:       `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in" and not http.request.uri.path matches "/21-04-2026/"`,
+		},
+		{
+			name:       "nine exempt days — matches clause covers window",
+			exemptDays: 9,
+			want:       `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in" and not http.request.uri.path matches "/(21|20|19|18|17|16|15|14|13)-04-2026/"`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a.exemptDays = tc.exemptDays
+			got := a.buildExpression(now)
+			if got != tc.want {
+				t.Errorf("got  %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// exemptExpression — corner cases with fixed dates
+// ---------------------------------------------------------------------------
+
+func date(year int, month time.Month, day int) time.Time {
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+}
+
+func articlePath(d time.Time) string {
+	return "/articles/123456/" + d.Format("02-01-2006") + "/some-slug"
+}
+
+func checkRegex(t *testing.T, re *regexp.Regexp, lastDay time.Time, days int) {
+	t.Helper()
+	for i := range days {
+		d := lastDay.AddDate(0, 0, -i)
+		if !re.MatchString(articlePath(d)) {
+			t.Errorf("regex should match %s (day %d of window)", d.Format("02-01-2006"), i)
 		}
 	}
+	// Day after window (newer than lastDay)
+	if after := lastDay.AddDate(0, 0, 1); re.MatchString(articlePath(after)) {
+		t.Errorf("regex should not match %s (day after window)", after.Format("02-01-2006"))
+	}
+	// Day before window (older than oldest exempt date)
+	if before := lastDay.AddDate(0, 0, -days); re.MatchString(articlePath(before)) {
+		t.Errorf("regex should not match %s (day before window)", before.Format("02-01-2006"))
+	}
 }
 
-func TestBuildExpression_ExemptsRecentDates(t *testing.T) {
-	expr := newApp().buildExpression()
-	// tomorrow through 7 days ago (9 dates total)
-	for i := range 9 {
-		d := time.Now().AddDate(0, 0, 1-i).Format("02-01-2006")
-		want := fmt.Sprintf(`"/%s/"`, d)
-		if !strings.Contains(expr, want) {
-			t.Errorf("expression missing exemption for date %s", d)
+func TestExemptExpression(t *testing.T) {
+	cases := []struct {
+		name     string
+		lastDay  time.Time
+		days     int
+		want     string
+		contains []string // for cases where exact match is impractical
+	}{
+		{
+			name:    "zero days returns empty",
+			lastDay: date(2026, 4, 20),
+			days:    0,
+			want:    "",
+		},
+		{
+			name:    "one day",
+			lastDay: date(2026, 4, 20),
+			days:    1,
+			want:    `/20-04-2026/`,
+		},
+		{
+			name:    "multiple days same month",
+			lastDay: date(2026, 4, 21),
+			days:    3,
+			want:    `/(21|20|19)-04-2026/`,
+		},
+		{
+			name:    "month boundary multiple days each side",
+			lastDay: date(2026, 4, 2),
+			days:    4,
+			want:    `/((02|01)-04-2026|(31|30)-03-2026)/`,
+		},
+		{
+			name:    "month boundary one day each side",
+			lastDay: date(2026, 4, 1),
+			days:    2,
+			want:    `/(01-04-2026|31-03-2026)/`,
+		},
+		{
+			name:    "year boundary",
+			lastDay: date(2026, 1, 1),
+			days:    3,
+			want:    `/(01-01-2026|(31|30)-12-2025)/`,
+		},
+		{
+			name:    "leap day",
+			lastDay: date(2028, 3, 1),
+			days:    3,
+			want:    `/(01-03-2028|(29|28)-02-2028)/`,
+		},
+		{
+			name:    "non-leap year feb",
+			lastDay: date(2026, 3, 1),
+			days:    3,
+			want:    `/(01-03-2026|(28|27)-02-2026)/`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := exemptExpression(tc.lastDay, tc.days)
+			if got != tc.want {
+				t.Errorf("got  %q\nwant %q", got, tc.want)
+			}
+			if tc.days == 0 {
+				return
+			}
+			re, err := regexp.Compile(got)
+			if err != nil {
+				t.Fatalf("invalid regex %q: %v", got, err)
+			}
+			checkRegex(t, re, tc.lastDay, tc.days)
+		})
+	}
+}
+
+func TestExemptExpression_SpansThreeMonths(t *testing.T) {
+	// Mar 1 back 32 days: spans January, February, and March 2026.
+	lastDay := date(2026, 3, 1)
+	got := exemptExpression(lastDay, 32)
+	for _, want := range []string{"03-2026", "02-2026", "01-2026"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("result missing %q: %s", want, got)
 		}
 	}
-}
-
-func TestBuildExpression_ExemptsTomorrow(t *testing.T) {
-	expr := newApp().buildExpression()
-	tomorrow := time.Now().AddDate(0, 0, 1).Format("02-01-2006")
-	if !strings.Contains(expr, tomorrow) {
-		t.Errorf("expression should exempt tomorrow (%s) for timezone offset", tomorrow)
-	}
-}
-
-func TestBuildExpression_DoesNotExemptOldDate(t *testing.T) {
-	expr := newApp().buildExpression()
-	old := time.Now().AddDate(0, 0, -8).Format("02-01-2006")
-	if strings.Contains(expr, old) {
-		t.Errorf("expression should not exempt date 8 days ago (%s)", old)
-	}
-}
-
-func TestBuildExpression_HasNineDateExemptions(t *testing.T) {
-	expr := newApp().buildExpression()
-	if !strings.Contains(expr, "not (") {
-		t.Error("expression missing 'not (' for date exemptions")
-	}
-	count := 0
-	for i := range 9 {
-		d := time.Now().AddDate(0, 0, 1-i).Format("02-01-2006")
-		if strings.Contains(expr, d) {
-			count++
-		}
-	}
-	if count != 9 {
-		t.Errorf("expected 9 date exemptions, found %d", count)
-	}
+	re := regexp.MustCompile(got)
+	checkRegex(t, re, lastDay, 32)
 }
 
 // ---------------------------------------------------------------------------
