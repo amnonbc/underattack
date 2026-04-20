@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -354,7 +355,7 @@ func main() {
 
 	cf := flag.String("config", "/etc/botCheck.conf", "config file")
 	flag.BoolFunc("debug", "enable debug logging", func(string) error {
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		slog.SetLogLoggerLevel(slog.LevelDebug)
 		return nil
 	})
 	flag.IntVar(&a.exemptDays, "exemptDays", 9, "number of days (including tomorrow) to exempt from bot check")
@@ -364,6 +365,8 @@ func main() {
 	flag.IntVar(&a.maxProcs, "maxProc", 20, "max number of lsphp processes we allow to run")
 	flag.StringVar(&a.loadFile, "loadFile", "/proc/loadavg", "location of loadavg proc file")
 	flag.Parse()
+
+	log.SetFlags(log.LstdFlags | log.LUTC)
 
 	if err := a.loadConfig(*cf); err != nil {
 		slog.Error("loading config", "err", err)
