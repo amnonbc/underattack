@@ -9,16 +9,28 @@ import (
 	"time"
 )
 
-// pushMetric sends the current bot check rule state to Grafana Cloud via OTLP
-// JSON. It is a no-op if MetricsURL is not configured.
-func (a *app) pushMetric(enabled bool) {
+// pushMetrics sends metrics to Grafana Cloud via OTLP JSON. It is a no-op if
+// MetricsURL is not configured. values maps metric names to their float64 values.
+func (a *app) pushMetrics(values map[string]float64) {
 	if a.conf.MetricsURL == "" {
 		return
 	}
 
-	value := 0
-	if enabled {
-		value = 1
+	now := time.Now().UTC().UnixNano()
+	metrics := make([]any, 0, len(values))
+
+	for name, val := range values {
+		metrics = append(metrics, map[string]any{
+			"name": name,
+			"gauge": map[string]any{
+				"dataPoints": []any{
+					map[string]any{
+						"asDouble":      fmt.Sprintf("%.2f", val),
+						"timeUnixNano": fmt.Sprintf("%d", now),
+					},
+				},
+			},
+		})
 	}
 
 	payload := map[string]any{
@@ -26,19 +38,7 @@ func (a *app) pushMetric(enabled bool) {
 			map[string]any{
 				"scopeMetrics": []any{
 					map[string]any{
-						"metrics": []any{
-							map[string]any{
-								"name": "bot_check_rule_enabled",
-								"gauge": map[string]any{
-									"dataPoints": []any{
-										map[string]any{
-											"asInt":         fmt.Sprintf("%d", value),
-											"timeUnixNano": fmt.Sprintf("%d", time.Now().UTC().UnixNano()),
-										},
-									},
-								},
-							},
-						},
+						"metrics": metrics,
 					},
 				},
 			},
@@ -47,13 +47,13 @@ func (a *app) pushMetric(enabled bool) {
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		slog.Warn("pushMetric: marshalling payload", "err", err)
+		slog.Warn("pushMetrics: marshalling payload", "err", err)
 		return
 	}
 
 	req, err := http.NewRequest(http.MethodPost, a.conf.MetricsURL, bytes.NewReader(body))
 	if err != nil {
-		slog.Warn("pushMetric: creating request", "err", err)
+		slog.Warn("pushMetrics: creating request", "err", err)
 		return
 	}
 	req.Header.Set("Authorization", "Basic "+a.conf.MetricsToken)
@@ -61,12 +61,12 @@ func (a *app) pushMetric(enabled bool) {
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		slog.Warn("pushMetric: sending metric", "err", err)
+		slog.Warn("pushMetrics: sending metric", "err", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
-		slog.Warn("pushMetric: unexpected status", "status", resp.Status)
+		slog.Warn("pushMetrics: unexpected status", "status", resp.Status)
 	}
 }

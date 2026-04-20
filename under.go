@@ -138,6 +138,32 @@ func countProcesses(pattern string) (int, error) {
 	return n, nil
 }
 
+// memoryPercent returns memory usage as a percentage (0-100).
+func memoryPercent() (float64, error) {
+	text, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	var memTotal, memAvail int64
+	for _, line := range strings.Split(string(text), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		val, _ := strconv.ParseInt(fields[1], 10, 64)
+		switch fields[0] {
+		case "MemTotal:":
+			memTotal = val
+		case "MemAvailable:":
+			memAvail = val
+		}
+	}
+	if memTotal == 0 {
+		return 0, errors.New("MemTotal not found")
+	}
+	return float64(memTotal-memAvail) / float64(memTotal) * 100, nil
+}
+
 // cfURL builds a Cloudflare API URL by joining baseURL with the given path segments.
 func (a *app) cfURL(segments ...string) string {
 	u, err := url.JoinPath(a.baseURL, segments...)
@@ -397,8 +423,26 @@ func (a *app) doIt() {
 		os.Exit(1)
 	}
 
+	memPct, err := memoryPercent()
+	if err != nil {
+		slog.Warn("could not read memory usage", "err", err)
+		memPct = 0
+	}
+
 	var ruleEnabled bool
-	defer func() { a.pushMetric(ruleEnabled) }()
+	var phpCount int
+	defer func() {
+		metrics := map[string]float64{
+			"bot_check_rule_enabled": 0,
+			"load_average":            la[0],
+			"memory_percent":          memPct,
+			"php_process_count":       float64(phpCount),
+		}
+		if ruleEnabled {
+			metrics["bot_check_rule_enabled"] = 1
+		}
+		a.pushMetrics(metrics)
+	}()
 
 	if err := a.checkDb(); err != nil {
 		slog.Warn("cannot connect to db, enabling bot check rule", "err", err)
@@ -411,6 +455,7 @@ func (a *app) doIt() {
 	}
 
 	lsphpCount, err := countProcesses("lsphp")
+	phpCount = lsphpCount
 	if err != nil {
 		slog.Warn("could not count lsphp processes", "err", err)
 	} else if lsphpCount > a.maxProcs {
