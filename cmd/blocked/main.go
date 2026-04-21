@@ -4,45 +4,104 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 )
 
-// parseLogTime extracts the timestamp from a log line
-// Format: "2026/04/20 13:11:05"
-func parseLogTime(line string) (time.Time, error) {
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
-		return time.Time{}, fmt.Errorf("no timestamp")
-	}
-	return time.Parse("2006/01/02 15:04:05", parts[0]+" "+parts[1])
+type LogEntry struct {
+	Time    time.Time
+	Enabled bool
 }
 
-// parseRuleState extracts enabled/disabled from log line
-// Look for: rule state enabled=true/false
-func parseRuleState(line string) (bool, bool) {
-	re := regexp.MustCompile(`rule state.*enabled=(true|false)`)
-	matches := re.FindStringSubmatch(line)
-	if len(matches) > 1 {
-		return matches[1] == "true", true
+var ruleStateRe = regexp.MustCompile(`rule state.*enabled=(true|false)`)
+
+// parseLogEntry parses a log line and returns a LogEntry if it contains a rule state,
+// otherwise returns nil. The line format must be: "YYYY/MM/DD HH:MM:SS ... rule state enabled=true/false ..."
+func parseLogEntry(line string) *LogEntry {
+	// Extract timestamp (first two space-separated fields)
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return nil
 	}
-	return false, false
+
+	logTime, err := time.Parse("2006/01/02 15:04:05", parts[0]+" "+parts[1])
+	if err != nil {
+		return nil
+	}
+
+	// Extract rule state from the line
+	matches := ruleStateRe.FindStringSubmatch(line)
+	if len(matches) < 2 {
+		return nil
+	}
+
+	return &LogEntry{
+		Time:    logTime,
+		Enabled: matches[1] == "true",
+	}
+}
+
+// analyzeLog reads from the provided reader and returns rule state statistics grouped by the given timeFormat.
+func analyzeLog(r io.Reader, cutoff time.Time, timeFormat string) (map[string][]bool, error) {
+	states := make(map[string][]bool)
+	scanner := bufio.NewScanner(r)
+
+	for scanner.Scan() {
+		entry := parseLogEntry(scanner.Text())
+		if entry == nil {
+			continue
+		}
+
+		if entry.Time.Before(cutoff) {
+			continue
+		}
+
+		key := entry.Time.Format(timeFormat)
+		states[key] = append(states[key], entry.Enabled)
+	}
+
+	return states, scanner.Err()
+}
+
+// reportResults prints percentage statistics grouped by timeFormat.
+func reportResults(states map[string][]bool, cutoff, now time.Time, timeFormat string, increment func(time.Time) time.Time) {
+	fmt.Println("Timestamp      | % Enabled | Samples")
+	fmt.Println("---------------|-----------|--------")
+
+	for t := cutoff; !t.After(now); t = increment(t) {
+		key := t.Format(timeFormat)
+		entries, ok := states[key]
+		if !ok || len(entries) == 0 {
+			continue
+		}
+
+		enabledCount := 0
+		for _, enabled := range entries {
+			if enabled {
+				enabledCount++
+			}
+		}
+
+		pct := float64(enabledCount) / float64(len(entries)) * 100
+		fmt.Printf("%s | %8.1f%% | %d\n", key, pct, len(entries))
+	}
 }
 
 func main() {
 	days := flag.Int("days", 0, "Number of days to analyze (0 = entire file)")
+	hours := flag.Bool("hours", false, "Summarize by hours instead of days")
 	flag.Parse()
 
 	args := flag.Args()
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: blocked [-days N] logfile\n")
+		fmt.Fprintf(os.Stderr, "Usage: blocked [-days N] [-hours] logfile\n")
 		os.Exit(1)
 	}
 
-	logPath := args[0]
-	file, err := os.Open(logPath)
+	file, err := os.Open(args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
 		os.Exit(1)
@@ -54,61 +113,30 @@ func main() {
 	if *days > 0 {
 		cutoff = now.AddDate(0, 0, -*days)
 	} else {
-		cutoff = time.Time{} // Process entire file (year 0 is before any real date)
+		cutoff = time.Time{} // Process entire file
 	}
 
-	// Map of date -> list of rule states (bool) by minute
-	dailyStates := make(map[string][]bool)
+	// Choose format and increment function based on -hours flag
+	var timeFormat string
+	var increment func(time.Time) time.Time
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		logTime, err := parseLogTime(line)
-		if err != nil {
-			continue
+	if *hours {
+		timeFormat = "2006-01-02 15:00"
+		increment = func(t time.Time) time.Time {
+			return t.Add(time.Hour)
 		}
-
-		// Skip old logs
-		if logTime.Before(cutoff) {
-			continue
+	} else {
+		timeFormat = "2006-01-02"
+		increment = func(t time.Time) time.Time {
+			return t.AddDate(0, 0, 1)
 		}
-
-		enabled, found := parseRuleState(line)
-		if !found {
-			continue
-		}
-
-		// Group by date (YYYY-MM-DD)
-		dateKey := logTime.Format("2006-01-02")
-		dailyStates[dateKey] = append(dailyStates[dateKey], enabled)
 	}
 
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading log file: %v\n", err)
+	states, err := analyzeLog(file, cutoff, timeFormat)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error analyzing log: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Print results
-	fmt.Println("Date           | % Enabled | Samples")
-	fmt.Println("---------------|-----------|--------")
-
-	// Sort and print by date
-	for d := cutoff; !d.After(now); d = d.AddDate(0, 0, 1) {
-		dateKey := d.Format("2006-01-02")
-		states, ok := dailyStates[dateKey]
-		if !ok || len(states) == 0 {
-			continue
-		}
-
-		enabledCount := 0
-		for _, s := range states {
-			if s {
-				enabledCount++
-			}
-		}
-
-		pct := float64(enabledCount) / float64(len(states)) * 100
-		fmt.Printf("%s | %8.1f%% | %d\n", dateKey, pct, len(states))
-	}
+	reportResults(states, cutoff, now, timeFormat, increment)
 }

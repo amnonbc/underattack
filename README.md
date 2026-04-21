@@ -88,6 +88,36 @@ The dashboard displays:
 - **Memory Usage**: Memory utilization percentage
 - **PHP Process Count**: Active lsphp worker processes
 
+## Analysis Tool: blocked
+
+The `blocked` tool reads application logs and reports the daily percentage of time
+the bot check rule was activated. This is useful for understanding patterns and
+analyzing historical incidents.
+
+**Usage:**
+```bash
+# Analyze last 7 days of logs
+./blocked -days 7 logs/botCheck.log
+
+# Analyze entire log file
+./blocked logs/botCheck.log
+
+# Custom log file
+./blocked -days 30 /var/log/botcheck.log
+```
+
+**Output:**
+```
+Date           | % Enabled | Samples
+---------------|-----------|--------
+2026-04-19     |     40.0% |       5
+2026-04-20     |     60.0% |       5
+2026-04-21     |    100.0% |       5
+```
+
+The tool parses log lines with the format: `YYYY/MM/DD HH:MM:SS ... rule state enabled=true/false ...`
+and aggregates them by day.
+
 ## Cross-compiling for Linux
 
 ```
