@@ -27,7 +27,7 @@ func (a *app) pushMetrics(values map[string]float64) {
 			"gauge": map[string]any{
 				"dataPoints": []any{
 					map[string]any{
-						"asDouble":      fmt.Sprintf("%.2f", val),
+						"asDouble":      val,
 						"timeUnixNano": fmt.Sprintf("%d", now),
 					},
 				},
