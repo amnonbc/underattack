@@ -494,6 +494,8 @@ func (a *app) doIt() {
 	if info, err := a.findRule(); err == nil {
 		ruleEnabled = info != nil
 	}
+
+	slog.Info("rule state", "enabled", ruleEnabled)
 }
 
 // allBelow reports whether all values in a are strictly less than x.
