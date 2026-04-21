@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -71,10 +73,13 @@ func reportResults(states map[string][]bool, cutoff, now time.Time, timeFormat s
 	fmt.Println("Timestamp      | % Enabled | Samples")
 	fmt.Println("---------------|-----------|--------")
 
-	for t := cutoff; !t.After(now); t = increment(t) {
-		key := t.Format(timeFormat)
-		entries, ok := states[key]
-		if !ok || len(entries) == 0 {
+	// Extract and sort keys to avoid iterating through all possible time periods
+	keys := slices.Collect(maps.Keys(states))
+	slices.Sort(keys)
+
+	for _, key := range keys {
+		entries := states[key]
+		if len(entries) == 0 {
 			continue
 		}
 
