@@ -371,7 +371,9 @@ func (a *app) ensureBotCheck(active bool, reason string) error {
 // newApp returns an app with production defaults.
 func newApp() *app {
 	return &app{
-		client:     http.DefaultClient,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 		baseURL:    "https://api.cloudflare.com/client/v4",
 		exemptDays: 9,
 		dateFormat: "02-01-2006",
