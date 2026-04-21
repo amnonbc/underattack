@@ -6,17 +6,28 @@ Switch a Cloudflare WAF rule to challenge bots when server load is high.
 ## Overview
 
 This runs on a web host sitting behind Cloudflare. It is invoked by cron every
-few minutes and checks the server's load average, free memory, and database
+minute and checks the server's load average, free memory, and database
 connectivity. If the server is under stress it creates a Cloudflare WAF rule
 that issues a managed challenge to bot traffic, which typically allows server
 resources to recover. Once the server recovers the rule is deleted.
 
-The rule is a managed challenge targeting GET requests to `/articles/` paths,
-exempting:
+## How It Works
+
+Recent articles are cached by Cloudflare's edge and serve without hitting the
+origin. The real load problem comes from **archive crawlers**: bots that
+systematically traverse years of older content, each request hitting the
+uncached origin. A single crawler can generate tens of thousands of origin
+requests over hours or days.
+
+The rule challenges GET requests to `/articles/` paths while exempting:
 - Requests Cloudflare already identifies as known bots (`cf.client.bot`)
 - Logged-in WordPress users (those with a `wordpress_logged_in` cookie)
-- Articles published in the last 7 days (plus tomorrow, to cover timezone
-  differences between the server and the publication timezone)
+- Articles published in the last 7 days (plus tomorrow for timezone coverage)
+
+This preserves unfettered access to recent, cached, high-value content while
+forcing archive crawlers to pace slowly through uncached older articles. The
+crawler either gives up or spends hours proving it's not a bot, giving your
+origin server time to recover.
 
 The rule is created fresh on each activation so the exempted date window stays
 current. If the rule already covers today's date it is left unchanged to avoid
