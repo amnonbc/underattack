@@ -5,10 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 )
@@ -46,10 +44,13 @@ func parseLogEntry(line string) *LogEntry {
 	}
 }
 
-// analyzeLog reads from the provided reader and returns rule state statistics grouped by the given timeFormat.
-func analyzeLog(r io.Reader, cutoff time.Time, timeFormat string) (map[string][]bool, error) {
-	states := make(map[string][]bool)
+// analyzeLog reads from the provided reader and calls report for each time period's statistics.
+// Exploits monotonic log ordering: all entries for a given period are consecutive.
+func analyzeLog(r io.Reader, cutoff time.Time, timeFormat string, report func(key string, enabledCount, total int)) error {
 	scanner := bufio.NewScanner(r)
+
+	var currentKey string
+	var enabledCount, total int
 
 	for scanner.Scan() {
 		entry := parseLogEntry(scanner.Text())
@@ -62,37 +63,32 @@ func analyzeLog(r io.Reader, cutoff time.Time, timeFormat string) (map[string][]
 		}
 
 		key := entry.Time.Format(timeFormat)
-		states[key] = append(states[key], entry.Enabled)
+
+		// When key changes, report previous period
+		if key != currentKey && total > 0 {
+			report(currentKey, enabledCount, total)
+			enabledCount, total = 0, 0
+		}
+
+		currentKey = key
+		total++
+		if entry.Enabled {
+			enabledCount++
+		}
 	}
 
-	return states, scanner.Err()
+	// Report final period
+	if total > 0 {
+		report(currentKey, enabledCount, total)
+	}
+
+	return scanner.Err()
 }
 
-// reportResults prints percentage statistics grouped by timeFormat.
-func reportResults(states map[string][]bool, cutoff, now time.Time, timeFormat string, increment func(time.Time) time.Time) {
-	fmt.Println("Timestamp      | % Enabled | Samples")
-	fmt.Println("---------------|-----------|--------")
-
-	// Extract and sort keys to avoid iterating through all possible time periods
-	keys := slices.Collect(maps.Keys(states))
-	slices.Sort(keys)
-
-	for _, key := range keys {
-		entries := states[key]
-		if len(entries) == 0 {
-			continue
-		}
-
-		enabledCount := 0
-		for _, enabled := range entries {
-			if enabled {
-				enabledCount++
-			}
-		}
-
-		pct := float64(enabledCount) / float64(len(entries)) * 100
-		fmt.Printf("%s | %8.1f%% | %d\n", key, pct, len(entries))
-	}
+// printResult is a callback that prints a single time period's statistics.
+func printResult(key string, enabledCount, total int) {
+	pct := float64(enabledCount) / float64(total) * 100
+	fmt.Printf("%s | %8.1f%% | %d\n", key, pct, total)
 }
 
 func main() {
@@ -121,27 +117,20 @@ func main() {
 		cutoff = time.Time{} // Process entire file
 	}
 
-	// Choose format and increment function based on -hours flag
+	// Choose format based on -hours flag
 	var timeFormat string
-	var increment func(time.Time) time.Time
-
 	if *hours {
 		timeFormat = "2006-01-02 15:00"
-		increment = func(t time.Time) time.Time {
-			return t.Add(time.Hour)
-		}
 	} else {
 		timeFormat = "2006-01-02"
-		increment = func(t time.Time) time.Time {
-			return t.AddDate(0, 0, 1)
-		}
 	}
 
-	states, err := analyzeLog(file, cutoff, timeFormat)
+	fmt.Println("Timestamp      | % Enabled | Samples")
+	fmt.Println("---------------|-----------|--------")
+
+	err = analyzeLog(file, cutoff, timeFormat, printResult)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error analyzing log: %v\n", err)
 		os.Exit(1)
 	}
-
-	reportResults(states, cutoff, now, timeFormat, increment)
 }

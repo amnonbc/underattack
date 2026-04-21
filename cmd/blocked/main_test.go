@@ -87,35 +87,31 @@ func TestBlockedAnalysis(t *testing.T) {
 		"2026-04-21": {total: 5, enabled: 5},
 	}
 
-	states, err := analyzeLog(reader, time.Time{}, "2006-01-02")
+	results := make(map[string]struct{ enabled, total int })
+	err := analyzeLog(reader, time.Time{}, "2006-01-02", func(key string, enabledCount, total int) {
+		results[key] = struct{ enabled, total int }{enabledCount, total}
+	})
 	if err != nil {
 		t.Fatalf("analyzeLog failed: %v", err)
 	}
 
 	// Verify results
 	for dateKey, expected := range expectedResults {
-		entries, ok := states[dateKey]
+		result, ok := results[dateKey]
 		if !ok {
 			t.Errorf("Missing data for date %s", dateKey)
 			continue
 		}
 
-		if len(entries) != expected.total {
-			t.Errorf("Date %s: got %d samples, want %d", dateKey, len(entries), expected.total)
+		if result.total != expected.total {
+			t.Errorf("Date %s: got %d samples, want %d", dateKey, result.total, expected.total)
 		}
 
-		enabledCount := 0
-		for _, enabled := range entries {
-			if enabled {
-				enabledCount++
-			}
+		if result.enabled != expected.enabled {
+			t.Errorf("Date %s: got %d enabled, want %d", dateKey, result.enabled, expected.enabled)
 		}
 
-		if enabledCount != expected.enabled {
-			t.Errorf("Date %s: got %d enabled, want %d", dateKey, enabledCount, expected.enabled)
-		}
-
-		pct := float64(enabledCount) / float64(len(entries)) * 100
-		t.Logf("Date %s: %.1f%% enabled (%d/%d)", dateKey, pct, enabledCount, len(entries))
+		pct := float64(result.enabled) / float64(result.total) * 100
+		t.Logf("Date %s: %.1f%% enabled (%d/%d)", dateKey, pct, result.enabled, result.total)
 	}
 }
