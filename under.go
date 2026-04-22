@@ -381,6 +381,7 @@ func newApp() *app {
 }
 
 func main() {
+	start := time.Now()
 	a := newApp()
 
 	cf := flag.String("config", "/etc/botCheck.conf", "config file")
@@ -409,6 +410,7 @@ func main() {
 	}
 
 	a.doIt()
+	slog.Debug("invocation complete", "duration", time.Since(start))
 }
 
 // doIt checks server health and creates or removes the bot check rule accordingly.
@@ -434,6 +436,7 @@ func (a *app) doIt() {
 	var ruleEnabled bool
 	var phpCount int
 	defer func() {
+		slog.Info("rule state", "enabled", ruleEnabled)
 		// bot_check_rule_active_seconds increments by 60 (1 min interval) when rule is active
 		ruleActiveSeconds := 0.0
 		if ruleEnabled {
@@ -496,8 +499,6 @@ func (a *app) doIt() {
 	if info, err := a.findRule(); err == nil {
 		ruleEnabled = info != nil
 	}
-
-	slog.Info("rule state", "enabled", ruleEnabled)
 }
 
 // allBelow reports whether all values in a are strictly less than x.
