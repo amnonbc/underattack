@@ -88,7 +88,7 @@ func analyzeLog(r io.Reader, cutoff time.Time, timeFormat string, report func(ke
 // printResult is a callback that prints a single time period's statistics.
 func printResult(key string, enabledCount, total int) {
 	pct := float64(enabledCount) / float64(total) * 100
-	fmt.Printf("%s | %8s | %8.1f%% | %d\n", key, time.Duration(enabledCount)*time.Minute, pct, total)
+	fmt.Printf("%-16s | %8.1f%% | %8s | %d\n", key, pct, time.Duration(enabledCount)*time.Minute, total)
 }
 
 func main() {
@@ -125,8 +125,8 @@ func main() {
 		timeFormat = "2006-01-02"
 	}
 
-	fmt.Println("Timestamp      | % Enabled | Blocked | Samples")
-	fmt.Println("---------------|-----------|---------|--------")
+	fmt.Println("Timestamp        | % Enabled | Blocked  | Samples")
+	fmt.Println("-----------------+-----------+----------+---------")
 
 	err = analyzeLog(file, cutoff, timeFormat, printResult)
 	if err != nil {
