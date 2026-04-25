@@ -399,6 +399,8 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
 
+	printVersion()
+
 	if err := a.loadConfig(*cf); err != nil {
 		slog.Error("loading config", "err", err)
 		os.Exit(1)
