@@ -185,19 +185,33 @@ func (a *app) NewRequest(method, endpoint string, body io.Reader) (*http.Request
 }
 
 // buildExpression returns the Cloudflare WAF rule expression that challenges bots
-// on article pages, exempting articles published within the configured date window.
-func (a *app) buildExpression() string {
-	base := `http.request.uri.path contains "/articles/" and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
-	if a.exemptDays == 0 {
-		return base
+// on article pages, exempting articles published within the configured date window,
+// and also challenges old uploads, exempting uploads from the last two months.
+func (a *app) buildExpressionAt(now time.Time) string {
+	// Articles clause with date exemptions
+	articlesClause := `http.request.uri.path contains "/articles/"`
+	if a.exemptDays > 0 {
+		clauses := make([]string, a.exemptDays)
+		for i := range a.exemptDays {
+			d := now.AddDate(0, 0, 1-i).Format(a.dateFormat)
+			clauses[i] = fmt.Sprintf(`http.request.uri.path contains "/%s/"`, d)
+		}
+		articlesClause += " and not (" + strings.Join(clauses, " or ") + ")"
 	}
-	now := time.Now()
-	clauses := make([]string, a.exemptDays)
-	for i := range a.exemptDays {
-		d := now.AddDate(0, 0, 1-i).Format(a.dateFormat) // tomorrow through (exemptDays-2) days ago
-		clauses[i] = fmt.Sprintf(`http.request.uri.path contains "/%s/"`, d)
+
+	// Uploads clause with month exemptions (last 2 months)
+	uploadsClause := `http.request.uri.path contains "/wp-content/uploads/20"`
+	var monthExemptions []string
+	for i := range 2 {
+		monthDate := now.AddDate(0, -i, 0)
+		monthStr := monthDate.Format("2006/01")
+		monthExemptions = append(monthExemptions, fmt.Sprintf(`http.request.uri.path contains "/wp-content/uploads/%s"`, monthStr))
 	}
-	return base + " and not (" + strings.Join(clauses, " or ") + ")"
+	uploadsClause += " and not (" + strings.Join(monthExemptions, " or ") + ")"
+
+	// Combine both clauses with common filters
+	commonFilters := `http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
+	return `(` + articlesClause + ` or ` + uploadsClause + `) and ` + commonFilters
 }
 
 const botCheckDescription = "Bot check"
@@ -282,7 +296,7 @@ func (a *app) createRule(reason string) error {
 		"action":      "managed_challenge",
 		"description": botCheckDescription,
 		"enabled":     true,
-		"expression":  a.buildExpression(),
+		"expression":  a.buildExpressionAt(time.Now()),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

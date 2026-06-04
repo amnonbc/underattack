@@ -434,8 +434,10 @@ func TestEnsureBotCheck_NoopWhenInactiveAndNoRule(t *testing.T) {
 // buildExpression
 // ---------------------------------------------------------------------------
 
+var testNow = time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+
 func TestBuildExpression_ContainsBaseConditions(t *testing.T) {
-	expr := newApp().buildExpression()
+	expr := newApp().buildExpressionAt(testNow)
 	for _, want := range []string{
 		`http.request.uri.path contains "/articles/"`,
 		`http.request.method eq "GET"`,
@@ -449,47 +451,45 @@ func TestBuildExpression_ContainsBaseConditions(t *testing.T) {
 }
 
 func TestBuildExpression_ExemptsRecentDates(t *testing.T) {
-	expr := newApp().buildExpression()
-	// tomorrow through 7 days ago (9 dates total)
-	for i := range 9 {
-		d := time.Now().AddDate(0, 0, 1-i).Format("02-01-2006")
-		want := fmt.Sprintf(`"/%s/"`, d)
-		if !strings.Contains(expr, want) {
+	expr := newApp().buildExpressionAt(testNow)
+	wantDates := []string{"05-06-2026", "04-06-2026", "03-06-2026", "02-06-2026", "01-06-2026", "31-05-2026", "30-05-2026", "29-05-2026", "28-05-2026"}
+	for _, d := range wantDates {
+		if !strings.Contains(expr, d) {
 			t.Errorf("expression missing exemption for date %s", d)
 		}
 	}
 }
 
-func TestBuildExpression_ExemptsTomorrow(t *testing.T) {
-	expr := newApp().buildExpression()
-	tomorrow := time.Now().AddDate(0, 0, 1).Format("02-01-2006")
-	if !strings.Contains(expr, tomorrow) {
-		t.Errorf("expression should exempt tomorrow (%s) for timezone offset", tomorrow)
-	}
-}
-
 func TestBuildExpression_DoesNotExemptOldDate(t *testing.T) {
-	expr := newApp().buildExpression()
-	old := time.Now().AddDate(0, 0, -8).Format("02-01-2006")
-	if strings.Contains(expr, old) {
-		t.Errorf("expression should not exempt date 8 days ago (%s)", old)
+	expr := newApp().buildExpressionAt(testNow)
+	// 8 days ago from 2026-06-04 is 2026-05-27
+	if strings.Contains(expr, "27-05-2026") {
+		t.Error("expression should not exempt date 8 days ago (27-05-2026)")
 	}
 }
 
-func TestBuildExpression_HasNineDateExemptions(t *testing.T) {
-	expr := newApp().buildExpression()
-	if !strings.Contains(expr, "not (") {
-		t.Error("expression missing 'not (' for date exemptions")
-	}
-	count := 0
-	for i := range 9 {
-		d := time.Now().AddDate(0, 0, 1-i).Format("02-01-2006")
-		if strings.Contains(expr, d) {
-			count++
-		}
-	}
-	if count != 9 {
-		t.Errorf("expected 9 date exemptions, found %d", count)
+func TestBuildExpressionAt_FullExpression(t *testing.T) {
+	a := newApp()
+	expr := a.buildExpressionAt(testNow)
+
+	// Expected expression structure (9 dates: tomorrow through 7 days ago)
+	want := `(http.request.uri.path contains "/articles/" and not (` +
+		`http.request.uri.path contains "/05-06-2026/" or ` +
+		`http.request.uri.path contains "/04-06-2026/" or ` +
+		`http.request.uri.path contains "/03-06-2026/" or ` +
+		`http.request.uri.path contains "/02-06-2026/" or ` +
+		`http.request.uri.path contains "/01-06-2026/" or ` +
+		`http.request.uri.path contains "/31-05-2026/" or ` +
+		`http.request.uri.path contains "/30-05-2026/" or ` +
+		`http.request.uri.path contains "/29-05-2026/" or ` +
+		`http.request.uri.path contains "/28-05-2026/"` +
+		`) or http.request.uri.path contains "/wp-content/uploads/20" and not (` +
+		`http.request.uri.path contains "/wp-content/uploads/2026/06" or ` +
+		`http.request.uri.path contains "/wp-content/uploads/2026/05"` +
+		`)) and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
+
+	if expr != want {
+		t.Errorf("expression mismatch.\ngot:  %s\nwant: %s", expr, want)
 	}
 }
 
