@@ -199,19 +199,9 @@ func (a *app) buildExpressionAt(now time.Time) string {
 		articlesClause += " and not (" + strings.Join(clauses, " or ") + ")"
 	}
 
-	// Uploads clause with month exemptions (last 2 months)
-	uploadsClause := `http.request.uri.path contains "/wp-content/uploads/20"`
-	var monthExemptions []string
-	for i := range 2 {
-		monthDate := now.AddDate(0, -i, 0)
-		monthStr := monthDate.Format("2006/01")
-		monthExemptions = append(monthExemptions, fmt.Sprintf(`http.request.uri.path contains "/wp-content/uploads/%s"`, monthStr))
-	}
-	uploadsClause += " and not (" + strings.Join(monthExemptions, " or ") + ")"
-
 	// Combine both clauses with common filters
 	commonFilters := `http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
-	return `(` + articlesClause + ` or ` + uploadsClause + `) and ` + commonFilters
+	return `(` + articlesClause + ` ) and ` + commonFilters
 }
 
 const botCheckDescription = "Bot check"

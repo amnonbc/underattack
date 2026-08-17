@@ -483,10 +483,7 @@ func TestBuildExpressionAt_FullExpression(t *testing.T) {
 		`http.request.uri.path contains "/30-05-2026/" or ` +
 		`http.request.uri.path contains "/29-05-2026/" or ` +
 		`http.request.uri.path contains "/28-05-2026/"` +
-		`) or http.request.uri.path contains "/wp-content/uploads/20" and not (` +
-		`http.request.uri.path contains "/wp-content/uploads/2026/06" or ` +
-		`http.request.uri.path contains "/wp-content/uploads/2026/05"` +
-		`)) and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
+		`) ) and http.request.method eq "GET" and not cf.client.bot and not http.cookie contains "wordpress_logged_in"`
 
 	if expr != want {
 		t.Errorf("expression mismatch.\ngot:  %s\nwant: %s", expr, want)
